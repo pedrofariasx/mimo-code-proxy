@@ -1,0 +1,12 @@
+services:
+  mimo-code-proxy:
+    build: .
+    ports:
+      - "${MIMO_PROXY_PORT:-8787}:8787"
+    env_file:
+      - .env
+    volumes:
+      - mimo-sandbox:/app/sandbox
+
+volumes:
+  mimo-sandbox:

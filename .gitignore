@@ -1,0 +1,7 @@
+.kilo
+.mimocode
+.env
+node_modules/
+sandbox/
+*.log
+.DS_Store
