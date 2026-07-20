@@ -16,12 +16,6 @@ try {
   // sem .env: usa apenas variáveis do shell
 }
 
-const TOKEN = process.env.MIMO_PROXY_TOKEN;
-if (!TOKEN) {
-  console.error("Erro: defina MIMO_PROXY_TOKEN");
-  process.exit(1);
-}
-
 export const SERVER_URL = process.env.MIMO_SERVER_URL || "http://127.0.0.1:4096";
 export const SERVER_PASSWORD = process.env.MIMO_SERVER_PASSWORD || "";
 export const PORT = Number(process.env.MIMO_PROXY_PORT || 8787);
@@ -32,6 +26,12 @@ export const MODE = (process.env.MIMO_PROXY_MODE || "raw").toLowerCase();
 export const RAW = MODE !== "agent";
 export const WATCHDOG_MS = Number(process.env.MIMO_PROXY_WATCHDOG_MS || 600_000);
 export const BODY_MAX_BYTES = 4 * 1024 * 1024; // ~1M tokens (~4 chars/token)
+
+const TOKEN = process.env.MIMO_PROXY_TOKEN;
+if (REQUIRE_AUTH && !TOKEN) {
+  console.error("Erro: defina MIMO_PROXY_TOKEN");
+  process.exit(1);
+}
 
 export const upstream = new URL(SERVER_URL);
 export const SERVER_AUTH = SERVER_PASSWORD

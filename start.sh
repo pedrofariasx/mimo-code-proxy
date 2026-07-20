@@ -27,6 +27,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 NO_AUTH="false"
+if [ "${MIMO_PROXY_REQUIRE_AUTH:-}" = "false" ]; then
+  NO_AUTH="true"
+fi
 USE_GLOBAL="false"
 for a in "$@"; do
   [ "$a" = "--no-auth" ] && NO_AUTH="true"
@@ -83,7 +86,7 @@ echo "  MiMo Code Proxy está pronto"
 echo "=============================================="
 echo "  Binário         : $MIMO_BIN_ABS"
 echo "  Proxy na porta  : $PROXY_PORT"
-[ "$NO_AUTH" = "true" ] && echo "  Auth do proxy    : DESLIGADA (--no-auth)" || echo "  API Key          : $PROXY_TOKEN"
+[ "$NO_AUTH" = "true" ] && echo "  Auth do proxy    : DESLIGADA" || echo "  API Key          : $PROXY_TOKEN"
 echo "  Modelo padrão   : ${MIMO_PROXY_MODEL:-mimo-auto}"
 echo ""
 echo "  Exemplos de uso:"
