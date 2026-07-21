@@ -57,7 +57,12 @@ else
   mkdir -p "$SANDBOX"
   if [ ! -x "$SANDBOX/mimo" ]; then
     echo "==> Baixando MiMo Code para o sandbox ($SANDBOX)..."
-    OS=linux; ARCH=x64
+    OS=linux
+    case "$(uname -m)" in
+      aarch64|arm64) ARCH=arm64 ;;
+      x86_64|amd64)  ARCH=x64 ;;
+      *) echo "Arquitetura não suportada: $(uname -m)"; exit 1 ;;
+    esac
     VER="${MIMO_VERSION:-$(curl -fsSL https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/latest 2>/dev/null | tr -d '[:space:]' | sed 's/^v//')}"
     URL="https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/v${VER}/mimocode-${OS}-${ARCH}.tar.gz"
     echo "    versão $VER de $URL"
