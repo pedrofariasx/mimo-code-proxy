@@ -108,7 +108,7 @@ echo ""
 
 # 2. Servidor do MiMo (sandbox)
 MIMOCODE_SERVER_PASSWORD="$MIMO_PASSWORD" \
-  "$MIMO_BIN_ABS" serve --hostname 127.0.0.1 --port "$MIMO_PORT" --print-logs &
+  "$MIMO_BIN_ABS" serve --hostname 0.0.0.0 --port "$MIMO_PORT" --print-logs &
 MIMO_PID=$!
 
 # 3. Proxy reverso + OpenAI
