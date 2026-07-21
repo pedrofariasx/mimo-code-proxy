@@ -190,6 +190,28 @@ export function parseHermesToolCalls(text, tools) {
     if (toolCalls.length) content = content.replace(fnRe, "").trim();
   }
 
+  // Fallback: parse [Called name with {json}] format
+  if (!toolCalls.length && content.includes("[Called ")) {
+    const calledRe = /\[Called\s+([a-zA-Z0-9_.-]+)\s+with\s+(\{[^}]*\})\]/g;
+    let cm;
+    while ((cm = calledRe.exec(content)) !== null) {
+      const name = cm[1];
+      if (!schemaByName[name]) continue;
+      let args;
+      try { args = JSON.parse(cm[2]); }
+      catch {
+        try { args = JSON.parse(jsonrepair(cm[2])); }
+        catch { continue; }
+      }
+      toolCalls.push({
+        id: "call_" + Math.random().toString(36).slice(2, 12),
+        type: "function",
+        function: { name, arguments: JSON.stringify(args) },
+      });
+    }
+    if (toolCalls.length) content = content.replace(calledRe, "").trim();
+  }
+
   return { content, toolCalls };
 }
 

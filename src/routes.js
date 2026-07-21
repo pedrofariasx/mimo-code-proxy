@@ -30,6 +30,7 @@ import {
   parseHermesToolCalls,
   formatToolPart,
 } from "./tools.js";
+import { jsonrepair } from "jsonrepair";
 
 const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000 });
 
@@ -297,18 +298,49 @@ export function handleChatCompletions(clientReq, clientRes) {
         let lastTextEnd = 0;
         let cleanText = "";
         const matches = [];
+        const patterns = [];
+
+        // Collect <tool_call> blocks
         const blockRe = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/g;
         let m;
         while ((m = blockRe.exec(fullText)) !== null) {
-          const matchStart = m.index;
-          const matchEnd = blockRe.lastIndex;
-          const precedingText = fullText.slice(lastTextEnd, matchStart);
-          cleanText += precedingText;
-          matches.push({
+          patterns.push({
+            start: m.index,
+            end: blockRe.lastIndex,
+            type: "xml",
             inner: m[1],
             isComplete: m[0].endsWith("</tool_call>") || isFinal,
           });
-          lastTextEnd = matchEnd;
+        }
+
+        // Collect [Called name with {json}] blocks
+        if (clientTools) {
+          const schemaByName = {};
+          for (const t of clientTools) {
+            if (t?.function?.name) schemaByName[t.function.name] = t.function.parameters;
+          }
+          const calledRe = /\[Called\s+([a-zA-Z0-9_.-]+)\s+with\s+(\{[^}]*\})\]/g;
+          let cm;
+          while ((cm = calledRe.exec(fullText)) !== null) {
+            if (schemaByName[cm[1]]) {
+              patterns.push({
+                start: cm.index,
+                end: calledRe.lastIndex,
+                type: "called",
+                name: cm[1],
+                argsStr: cm[2],
+                isComplete: true,
+              });
+            }
+          }
+        }
+
+        // Sort by position and build cleanText + matches
+        patterns.sort((a, b) => a.start - b.start);
+        for (const p of patterns) {
+          cleanText += fullText.slice(lastTextEnd, p.start);
+          matches.push(p);
+          lastTextEnd = p.end;
         }
         if (lastTextEnd < fullText.length) {
           cleanText += fullText.slice(lastTextEnd);
@@ -326,25 +358,36 @@ export function handleChatCompletions(clientReq, clientRes) {
         // 2. Stream completed tool calls
         for (let i = 0; i < matches.length; i++) {
           const match = matches[i];
-          if (match.isComplete && i >= streamState.sentToolCallsCount) {
+          if (!match.isComplete || i < streamState.sentToolCallsCount) continue;
+
+          let toolCalls = [];
+          if (match.type === "xml") {
             const parsed = parseHermesToolCalls("<tool_call>" + match.inner + "</tool_call>", clientTools);
-            if (parsed.toolCalls && parsed.toolCalls.length) {
-              const deltas = parsed.toolCalls.map((tc, idx) => {
-                const item = {
-                  index: streamState.totalToolCallsSent + idx,
-                  ...tc,
-                };
-                streamState.allToolCalls.push(tc);
-                return item;
-              });
-              sse(
-                clientRes,
-                openAIDeltaRaw(chatId, model, created, { tool_calls: deltas }),
-              );
-              streamState.totalToolCallsSent += parsed.toolCalls.length;
+            toolCalls = parsed.toolCalls || [];
+          } else if (match.type === "called") {
+            let args;
+            try { args = JSON.parse(match.argsStr); }
+            catch {
+              try { args = JSON.parse(jsonrepair(match.argsStr)); }
+              catch { continue; }
             }
-            streamState.sentToolCallsCount = i + 1;
+            toolCalls = [{
+              id: "call_" + Math.random().toString(36).slice(2, 12),
+              type: "function",
+              function: { name: match.name, arguments: JSON.stringify(args) },
+            }];
           }
+
+          if (toolCalls.length) {
+            const deltas = toolCalls.map((tc, idx) => ({
+              index: streamState.totalToolCallsSent + idx,
+              ...tc,
+            }));
+            for (const tc of toolCalls) streamState.allToolCalls.push(tc);
+            sse(clientRes, openAIDeltaRaw(chatId, model, created, { tool_calls: deltas }));
+            streamState.totalToolCallsSent += toolCalls.length;
+          }
+          streamState.sentToolCallsCount = i + 1;
         }
       };
 
