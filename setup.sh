@@ -11,7 +11,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${MIMO_CODE_PROXY_DIR:-$HOME/.mimo-code-proxy}"
-REPO_RAW="${MIMO_CODE_PROXY_REPO:-https://raw.githubusercontent.com/SEU-USER/mimo-code-proxy/main}"
+REPO_RAW="${MIMO_CODE_PROXY_REPO:-https://raw.githubusercontent.com/pedrofariasx/mimo-code-proxy/main}"
 
 echo "==> Instalando MiMo Code Proxy em $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"

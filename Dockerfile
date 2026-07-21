@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY package.json mimo-proxy.js start.sh ./
+COPY src/ src/
 RUN chmod +x start.sh
 
 EXPOSE 8787

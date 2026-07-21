@@ -14,7 +14,13 @@ export function isAuthorized(req) {
   const key = req.headers["x-api-key"];
   if (key && safeCompare(key, TOKEN)) return true;
   const q = new URL(req.url, "http://x").searchParams.get("api_key");
-  return q && safeCompare(q, TOKEN);
+  if (q && safeCompare(q, TOKEN)) return true;
+  const auth = req.headers["authorization"];
+  if (auth && auth.startsWith("Bearer ")) {
+    const bearerKey = auth.slice(7).trim();
+    if (safeCompare(bearerKey, TOKEN)) return true;
+  }
+  return false;
 }
 
 export function readBody(req, maxSize = BODY_MAX_BYTES) {

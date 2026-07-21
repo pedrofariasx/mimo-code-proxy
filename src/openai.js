@@ -29,7 +29,45 @@ export function extractText(mimoJson) {
     .join("");
 }
 
-export function openAICompletion(id, model, created, text, toolCalls) {
+export function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 3.8);
+}
+
+export function calculateUsage(promptMessages, completionText, toolCalls) {
+  let promptChars = 0;
+  for (const m of promptMessages || []) {
+    if (typeof m.content === "string") {
+      promptChars += m.content.length;
+    } else if (Array.isArray(m.content)) {
+      for (const c of m.content) {
+        if (c.type === "text" && typeof c.text === "string") {
+          promptChars += c.text.length;
+        }
+      }
+    }
+  }
+
+  const promptTokens = Math.max(1, estimateTokens(promptChars));
+
+  let completionTokens = estimateTokens(completionText || "");
+  if (toolCalls && toolCalls.length) {
+    for (const tc of toolCalls) {
+      if (tc.function?.arguments) {
+        completionTokens += estimateTokens(tc.function.arguments);
+      }
+      completionTokens += 20; // overhead por chamada de ferramenta
+    }
+  }
+
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
+}
+
+export function openAICompletion(id, model, created, text, toolCalls, usage) {
   const message = { role: "assistant", content: text || null };
   let finish_reason = "stop";
   if (toolCalls && toolCalls.length) {
@@ -42,7 +80,7 @@ export function openAICompletion(id, model, created, text, toolCalls) {
     created,
     model,
     choices: [{ index: 0, message, finish_reason }],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
 }
 
@@ -75,5 +113,16 @@ export function openAIDeltaRaw(id, model, created, delta, finish = null) {
     created,
     model,
     choices: [{ index: 0, delta, finish_reason: finish }],
+  };
+}
+
+export function openAIStreamUsage(id, model, created, usage) {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [],
+    usage,
   };
 }

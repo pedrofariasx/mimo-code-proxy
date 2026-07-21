@@ -28,6 +28,17 @@ import { openAIModels } from "./src/openai.js";
 import { reverseProxy, handleChatCompletions } from "./src/routes.js";
 
 const server = http.createServer(async (clientReq, clientRes) => {
+  // CORS Headers para permitir requisições de clientes web locais (ex: interfaces no navegador)
+  clientRes.setHeader("Access-Control-Allow-Origin", "*");
+  clientRes.setHeader("Access-Control-Allow-Headers", "*");
+  clientRes.setHeader("Access-Control-Allow-Methods", "*");
+
+  if (clientReq.method === "OPTIONS") {
+    clientRes.writeHead(200);
+    clientRes.end();
+    return;
+  }
+
   const url = new URL(clientReq.url, "http://x");
   const path = url.pathname;
 
@@ -93,6 +104,15 @@ server.on("upgrade", (clientReq, clientSocket) => {
   });
   req.on("error", () => clientSocket.destroy());
   req.end();
+});
+
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`Erro: a porta ${PORT} já está em uso.`);
+    process.exit(1);
+  }
+  console.error("Erro no servidor proxy:", err.message);
+  process.exit(1);
 });
 
 server.listen(PORT, HOST, () => {

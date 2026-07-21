@@ -18,6 +18,8 @@ import {
   extractText,
   genId,
   sse,
+  calculateUsage,
+  openAIStreamUsage,
 } from "./openai.js";
 import {
   buildConversation,
@@ -26,6 +28,75 @@ import {
   parseHermesToolCalls,
   formatToolPart,
 } from "./tools.js";
+
+const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000 });
+
+const MAX_MAP_ENTRIES = 500;
+
+const sessionPool = [];
+const MAX_POOL_SIZE = 2;
+let isRefilling = false;
+
+export async function refillPool() {
+  if (isRefilling || sessionPool.length >= MAX_POOL_SIZE) return;
+  isRefilling = true;
+  try {
+    while (sessionPool.length < MAX_POOL_SIZE) {
+      const resp = await serverReq("POST", "/session", {
+        directory: process.cwd(),
+        name: "openai-bridge",
+      });
+      const sid = resp.json?.id;
+      if (sid) {
+        sessionPool.push(sid);
+      } else {
+        break;
+      }
+    }
+  } catch (e) {
+    console.error("Erro ao pre-criar sessão no pool:", e.message);
+    // Tenta novamente em 2 segundos se falhar (ex: servidor MiMo ainda subindo)
+    setTimeout(() => refillPool().catch(() => {}), 2000);
+  } finally {
+    isRefilling = false;
+  }
+}
+
+async function acquireSession() {
+  if (sessionPool.length > 0) {
+    const sid = sessionPool.shift();
+    refillPool().catch(() => {});
+    return sid;
+  }
+  const resp = await serverReq("POST", "/session", {
+    directory: process.cwd(),
+    name: "openai-bridge",
+  });
+  const sid = resp.json?.id;
+  if (!sid) throw new Error("Sessão não criada pelo MiMo");
+  refillPool().catch(() => {});
+  return sid;
+}
+
+async function releaseSession(sid, retries = 3) {
+  if (!sid) return;
+  if (sessionPool.length < MAX_POOL_SIZE) {
+    sessionPool.push(sid);
+    return;
+  }
+  for (let i = 0; i < retries; i++) {
+    try {
+      await serverReq("DELETE", `/session/${sid}`);
+      return;
+    } catch {
+      if (i < retries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+  console.error(`Falha ao deletar sessão ${sid} após ${retries} tentativas`);
+}
+
+// Inicializa o pool de sessões
+refillPool().catch(() => {});
 
 export function reverseProxy(clientReq, clientRes) {
   const targetPath = clientReq.url;
@@ -38,6 +109,7 @@ export function reverseProxy(clientReq, clientRes) {
     hostname: upstream.hostname,
     port: upstream.port,
     path: targetPath,
+    agent,
     headers,
     timeout: 120000,
   };
@@ -107,40 +179,69 @@ export function handleChatCompletions(clientReq, clientRes) {
         if (body[p] != null) msgBody[p] = body[p];
       }
 
-      let session;
+      let sid;
       try {
-        session = await serverReq("POST", "/session", {
-          directory: process.cwd(),
-          name: "openai-bridge",
-        });
+        sid = await acquireSession();
       } catch (e) {
-        return bad(clientRes, "Falha ao criar sessão no MiMo: " + e.message, 502);
+        return bad(clientRes, "Falha ao obter sessão do pool: " + e.message, 502);
       }
-      const sid = session.json?.id;
-      if (!sid) return bad(clientRes, "Sessão não criada pelo MiMo", 502);
 
       const created = Math.floor(Date.now() / 1000);
       const chatId = genId();
 
       // ---------- Não-streaming ----------
       if (!stream) {
+        let tokensIn = 0;
+        let tokensOut = 0;
+        const subEvents = openMiMoEvents(
+          (evt) => {
+            if (evt.type === "metrics.model_call" && evt.properties?.sessionID === sid) {
+              tokensIn += evt.properties.total_tokens_in || 0;
+              tokensOut += evt.properties.total_tokens_out || 0;
+            }
+          },
+          () => {}
+        );
         try {
           const resp = await serverReq("POST", `/session/${sid}/message`, msgBody);
+          // Pequena pausa para garantir a entrega de eventos finais no stream
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          subEvents.close();
+
           let text = extractText(resp.json);
           let out;
+
+          let usage;
+          if (tokensIn > 0 || tokensOut > 0) {
+            usage = {
+              prompt_tokens: tokensIn,
+              completion_tokens: tokensOut,
+              total_tokens: tokensIn + tokensOut,
+            };
+          } else {
+            if (clientTools) {
+              const { content, toolCalls } = parseHermesToolCalls(text, clientTools);
+              usage = calculateUsage(body.messages, content, toolCalls);
+            } else {
+              const norm = RAW ? normalizeToolXML(text) : text;
+              usage = calculateUsage(body.messages, norm, []);
+            }
+          }
+
           if (clientTools) {
             const { content, toolCalls } = parseHermesToolCalls(text, clientTools);
-            out = openAICompletion(chatId, model, created, content, toolCalls);
+            out = openAICompletion(chatId, model, created, content, toolCalls, usage);
           } else {
             if (RAW) text = normalizeToolXML(text);
-            out = openAICompletion(chatId, model, created, text);
+            out = openAICompletion(chatId, model, created, text, null, usage);
           }
           clientRes.writeHead(200, { "Content-Type": "application/json" });
           clientRes.end(JSON.stringify(out));
         } catch (e) {
+          subEvents.close();
           return bad(clientRes, "Falha na chamada ao MiMo: " + e.message, 502);
         } finally {
-          serverReq("DELETE", `/session/${sid}`).catch(() => {});
+          releaseSession(sid);
         }
         return;
       }
@@ -158,43 +259,140 @@ export function handleChatCompletions(clientReq, clientRes) {
       let finished = false;
       const sentLen = new Map();
       const reasonLen = new Map();
+      const reasonBuf = new Map();
+      const partTypes = new Map();
       const toolAnnounced = new Set();
       const userMsgIds = new Set();
       const textBuf = new Map();
+      let messageResponseText = null;
+      let events = null;
 
-      const finish = (reason = "stop") => {
-        if (finished) return;
-        finished = true;
-        if (RAW && textBuf.size) {
-          const full = [...textBuf.values()].join("");
-          textBuf.clear();
-          if (clientTools) {
-            const { content, toolCalls } = parseHermesToolCalls(full, clientTools);
-            if (content) {
-              sse(clientRes, openAIDelta(chatId, model, created, content));
-            }
-            if (toolCalls.length) {
-              const deltas = toolCalls.map((tc, i) => ({ index: i, ...tc }));
+      const streamState = {
+        sentTextLength: 0,
+        sentToolCallsCount: 0,
+        totalToolCallsSent: 0,
+        allToolCalls: [],
+        cleanText: "",
+        total_tokens_in: 0,
+        total_tokens_out: 0,
+      };
+
+      const streamProgress = (fullText, isFinal = false) => {
+        let lastTextEnd = 0;
+        let cleanText = "";
+        const matches = [];
+        const blockRe = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/g;
+        let m;
+        while ((m = blockRe.exec(fullText)) !== null) {
+          const matchStart = m.index;
+          const matchEnd = blockRe.lastIndex;
+          const precedingText = fullText.slice(lastTextEnd, matchStart);
+          cleanText += precedingText;
+          matches.push({
+            inner: m[1],
+            isComplete: m[0].endsWith("</tool_call>") || isFinal,
+          });
+          lastTextEnd = matchEnd;
+        }
+        if (lastTextEnd < fullText.length) {
+          cleanText += fullText.slice(lastTextEnd);
+        }
+
+        streamState.cleanText = cleanText;
+
+        // 1. Stream new text content
+        if (cleanText.length > streamState.sentTextLength) {
+          const delta = cleanText.slice(streamState.sentTextLength);
+          streamState.sentTextLength = cleanText.length;
+          sse(clientRes, openAIDelta(chatId, model, created, delta));
+        }
+
+        // 2. Stream completed tool calls
+        for (let i = 0; i < matches.length; i++) {
+          const match = matches[i];
+          if (match.isComplete && i >= streamState.sentToolCallsCount) {
+            const parsed = parseHermesToolCalls("<tool_call>" + match.inner + "</tool_call>", clientTools);
+            if (parsed.toolCalls && parsed.toolCalls.length) {
+              const deltas = parsed.toolCalls.map((tc, idx) => {
+                const item = {
+                  index: streamState.totalToolCallsSent + idx,
+                  ...tc,
+                };
+                streamState.allToolCalls.push(tc);
+                return item;
+              });
               sse(
                 clientRes,
                 openAIDeltaRaw(chatId, model, created, { tool_calls: deltas }),
               );
+              streamState.totalToolCallsSent += parsed.toolCalls.length;
+            }
+            streamState.sentToolCallsCount = i + 1;
+          }
+        }
+      };
+
+      const finish = (reason = "stop") => {
+        if (finished) return;
+        finished = true;
+
+        const textFromEvents = textBuf.size ? [...textBuf.values()].join("") : null;
+        const full = textFromEvents || messageResponseText || "";
+        textBuf.clear();
+
+        let finalText = "";
+        let finalToolCalls = [];
+
+        if (RAW && full) {
+          if (clientTools) {
+            streamProgress(full, true);
+            finalText = streamState.cleanText;
+            finalToolCalls = streamState.allToolCalls;
+            if (streamState.totalToolCallsSent > 0) {
               reason = "tool_calls";
             }
           } else {
             const norm = normalizeToolXML(full);
-            if (norm) sse(clientRes, openAIDelta(chatId, model, created, norm));
+            const prev = sentLen.get("norm") || 0;
+            if (norm.length > prev) {
+              const delta = norm.slice(prev);
+              sentLen.set("norm", norm.length);
+              sse(clientRes, openAIDelta(chatId, model, created, delta));
+            }
+            finalText = norm;
           }
+        } else if (messageResponseText) {
+          const already = [...sentLen.values()].reduce((a, b) => a + b, 0);
+          if (messageResponseText.length > already) {
+            sse(clientRes, openAIDelta(chatId, model, created, messageResponseText.slice(already)));
+          }
+          finalText = messageResponseText;
+        } else {
+          finalText = full;
         }
+
         try {
           sse(clientRes, openAIDelta(chatId, model, created, null, reason));
+
+          let usage;
+          if (streamState.total_tokens_in > 0 || streamState.total_tokens_out > 0) {
+            usage = {
+              prompt_tokens: streamState.total_tokens_in,
+              completion_tokens: streamState.total_tokens_out,
+              total_tokens: streamState.total_tokens_in + streamState.total_tokens_out,
+            };
+          } else {
+            usage = calculateUsage(body.messages, finalText, finalToolCalls);
+          }
+          sse(clientRes, openAIStreamUsage(chatId, model, created, usage));
+
           clientRes.write("data: [DONE]\n\n");
         } catch {}
         try {
-          events.close();
+          if (events) events.close();
         } catch {}
         clearTimeout(watchdog);
-        serverReq("DELETE", `/session/${sid}`).catch(() => {});
+        releaseSession(sid);
         clientRes.end();
       };
 
@@ -208,24 +406,37 @@ export function handleChatCompletions(clientReq, clientRes) {
           if (info && info.sessionID === sid && info.role === "user") {
             userMsgIds.add(info.id);
           }
+        } else if (t === "metrics.model_call") {
+          const props = evt.properties;
+          if (props && props.sessionID === sid) {
+            streamState.total_tokens_in += props.total_tokens_in || 0;
+            streamState.total_tokens_out += props.total_tokens_out || 0;
+          }
         } else if (t === "message.part.updated") {
           const part = evt.properties?.part;
           if (!part || part.sessionID !== sid) return;
           if (userMsgIds.has(part.messageID)) return;
 
           if (part.type === "text" && typeof part.text === "string") {
+            partTypes.set(part.id, "text");
+            textBuf.set(part.id, part.text);
             if (RAW && clientTools) {
-              textBuf.set(part.id, part.text);
+              const fullText = [...textBuf.values()].join("");
+              streamProgress(fullText, false);
             } else {
-              const prev = sentLen.get(part.id) || 0;
-              if (part.text.length > prev) {
-                const delta = part.text.slice(prev);
-                sentLen.set(part.id, part.text.length);
+              const fullText = [...textBuf.values()].join("");
+              const norm = RAW ? normalizeToolXML(fullText) : fullText;
+              const prev = sentLen.get("norm") || 0;
+              if (norm.length > prev) {
+                const delta = norm.slice(prev);
+                sentLen.set("norm", norm.length);
                 sse(clientRes, openAIDelta(chatId, model, created, delta));
               }
             }
           } else if (part.type === "reasoning" && typeof part.text === "string") {
-            const prev = reasonLen.get(part.id) || 0;
+            partTypes.set(part.id, "reasoning");
+            const buf = (reasonBuf.get(part.id) || "");
+            const prev = Math.max(reasonLen.get(part.id) || 0, buf.length);
             if (part.text.length > prev) {
               const delta = part.text.slice(prev);
               reasonLen.set(part.id, part.text.length);
@@ -241,6 +452,7 @@ export function handleChatCompletions(clientReq, clientRes) {
             const key = part.callID + ":" + status;
             if (status === "running" && !toolAnnounced.has(key)) {
               toolAnnounced.add(key);
+              evictSet(toolAnnounced);
               sse(
                 clientRes,
                 openAIDeltaRaw(chatId, model, created, {
@@ -249,6 +461,7 @@ export function handleChatCompletions(clientReq, clientRes) {
               );
             } else if (status === "completed" && !toolAnnounced.has(key)) {
               toolAnnounced.add(key);
+              evictSet(toolAnnounced);
               sse(
                 clientRes,
                 openAIDeltaRaw(chatId, model, created, {
@@ -257,6 +470,7 @@ export function handleChatCompletions(clientReq, clientRes) {
               );
             } else if (status === "error" && !toolAnnounced.has(key)) {
               toolAnnounced.add(key);
+              evictSet(toolAnnounced);
               sse(
                 clientRes,
                 openAIDeltaRaw(chatId, model, created, {
@@ -264,6 +478,40 @@ export function handleChatCompletions(clientReq, clientRes) {
                 }),
               );
             }
+          }
+        } else if (t === "message.part.delta") {
+          const props = evt.properties;
+          if (props?.sessionID !== sid || props?.field !== "text" || !props?.partID) return;
+          const partID = props.partID;
+          const deltaText = props.delta || "";
+          if (!deltaText) return;
+
+          const pType = partTypes.get(partID);
+
+          if (pType === "text") {
+            const prev = textBuf.get(partID) || "";
+            textBuf.set(partID, prev + deltaText);
+            const fullText = [...textBuf.values()].join("");
+            if (RAW && clientTools) {
+              streamProgress(fullText, false);
+            } else {
+              const norm = RAW ? normalizeToolXML(fullText) : fullText;
+              const plen = sentLen.get("norm") || 0;
+              if (norm.length > plen) {
+                const d = norm.slice(plen);
+                sentLen.set("norm", norm.length);
+                sse(clientRes, openAIDelta(chatId, model, created, d));
+              }
+            }
+          } else {
+            const prev = reasonBuf.get(partID) || "";
+            reasonBuf.set(partID, prev + deltaText);
+            sse(
+              clientRes,
+              openAIDeltaRaw(chatId, model, created, {
+                reasoning_content: deltaText,
+              }),
+            );
           }
         } else if (t === "session.idle") {
           if (evt.properties?.sessionID === sid) finish("stop");
@@ -276,7 +524,7 @@ export function handleChatCompletions(clientReq, clientRes) {
         if (!finished) finish("stop");
       });
 
-      const events = openMiMoEvents(handleEvent, () => {
+      events = openMiMoEvents(handleEvent, () => {
         if (!finished && !aborted) finish("stop");
       });
 
@@ -285,22 +533,8 @@ export function handleChatCompletions(clientReq, clientRes) {
       serverReq("POST", `/session/${sid}/message`, msgBody)
         .then((resp) => {
           if (finished) return;
-          const full = extractText(resp.json);
-          if (full) {
-            if (RAW) {
-              textBuf.clear();
-              textBuf.set("final", full);
-            } else {
-              const already = [...sentLen.values()].reduce((a, b) => a + b, 0);
-              if (full.length > already) {
-                sse(
-                  clientRes,
-                  openAIDelta(chatId, model, created, full.slice(already)),
-                );
-              }
-            }
-          }
-          setTimeout(() => finish("stop"), 800);
+          messageResponseText = extractText(resp.json);
+          setTimeout(() => finish("stop"), 100);
         })
         .catch((e) => {
           if (!finished) {

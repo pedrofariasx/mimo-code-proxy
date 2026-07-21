@@ -97,9 +97,13 @@ export function buildToolsSystemPrompt(tools, toolChoice) {
   ].join("\n");
 }
 
-function coerceParam(value, schema) {
+function coerceParam(value, schema, paramName) {
+  let v = value;
+  // Strip exactly one leading and one trailing newline if present,
+  // which are often added by LLMs for XML tag alignment.
+  v = v.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+
   const type = schema?.type;
-  const v = value;
   if (type === "boolean") {
     const s = v.trim().toLowerCase();
     return s === "true" || s === "1" || s === "yes";
@@ -114,6 +118,13 @@ function coerceParam(value, schema) {
     } catch {
       return v;
     }
+  }
+
+  // Trim string parameters unless they are known to contain multi-line code/text
+  const preserveWhitespaceParams = ["content", "text", "code", "newstring", "oldstring", "patch", "diff"];
+  const nameLower = (paramName || "").toLowerCase();
+  if (!preserveWhitespaceParams.includes(nameLower)) {
+    v = v.trim();
   }
   return v;
 }
@@ -137,7 +148,8 @@ export function parseHermesToolCalls(text, tools) {
     const paramRe = /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g;
     let pm;
     while ((pm = paramRe.exec(fn[2])) !== null) {
-      args[pm[1]] = coerceParam(pm[2], params[pm[1]]);
+      const pName = pm[1];
+      args[pName] = coerceParam(pm[2], params[pName], pName);
     }
     toolCalls.push({
       id: "call_" + Math.random().toString(36).slice(2, 12),
