@@ -44,9 +44,10 @@ function evictSet(set, max = MAX_MAP_ENTRIES) {
 
 const sessionPool = [];
 let isRefilling = false;
+let isDraining = false;
 
-export async function refillPool() {
-  if (isRefilling || sessionPool.length >= MAX_POOL_SIZE) return;
+export async function refillPool(retries = 3) {
+  if (isRefilling || isDraining || sessionPool.length >= MAX_POOL_SIZE) return;
   isRefilling = true;
   try {
     while (sessionPool.length < MAX_POOL_SIZE) {
@@ -62,9 +63,11 @@ export async function refillPool() {
       }
     }
   } catch (e) {
-    console.error("Erro ao pre-criar sessão no pool:", e.message);
-    // Tenta novamente em 2 segundos se falhar (ex: servidor MiMo ainda subindo)
-    setTimeout(() => refillPool().catch(() => {}), 2000);
+    if (retries > 0) {
+      console.error(`Erro ao pre-criar sessão (${retries} retries left):`, e.message);
+      await new Promise((r) => setTimeout(r, 2000));
+      if (!isDraining) refillPool(retries - 1).catch(() => {});
+    }
   } finally {
     isRefilling = false;
   }
@@ -88,10 +91,7 @@ async function acquireSession() {
 
 async function releaseSession(sid, retries = 3) {
   if (!sid) return;
-  if (sessionPool.length < MAX_POOL_SIZE) {
-    sessionPool.push(sid);
-    return;
-  }
+  // Always delete used sessions — never return to pool (sessions have accumulated state)
   for (let i = 0; i < retries; i++) {
     try {
       await serverReq("DELETE", `/session/${sid}`);
@@ -107,15 +107,13 @@ async function releaseSession(sid, retries = 3) {
 refillPool().catch(() => {});
 
 export async function drainPool() {
+  isDraining = true;
   isRefilling = false;
   const sids = sessionPool.splice(0);
-  await Promise.all(sids.map(async (sid) => {
-    try {
-      await serverReq("DELETE", `/session/${sid}`);
-    } catch {
-      // best-effort cleanup on shutdown
-    }
-  }));
+  await Promise.allSettled(sids.map((sid) =>
+    serverReq("DELETE", `/session/${sid}`)
+  ));
+  isDraining = false;
 }
 
 export function reverseProxy(clientReq, clientRes) {
