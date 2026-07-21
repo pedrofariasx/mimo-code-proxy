@@ -30,10 +30,16 @@ fi
 chmod +x "$INSTALL_DIR/start.sh" 2>/dev/null || true
 
 # Instala o MiMo Code se preciso
-export PATH="$HOME/.mimocode/bin:$PATH"
 if ! command -v mimo >/dev/null 2>&1; then
   echo "==> Instalando MiMo Code..."
   curl -fsSL https://mimo.xiaomi.com/install | bash
+fi
+
+export PATH="$HOME/.mimocode/bin:$PATH"
+
+if ! command -v mimo >/dev/null 2>&1; then
+  echo "ERRO: mimo não encontrado. Verifique a instalação manual em https://mimo.xiaomi.com" >&2
+  exit 1
 fi
 
 echo ""

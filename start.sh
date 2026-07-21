@@ -48,7 +48,7 @@ if [ "$USE_GLOBAL" = "true" ] && command -v mimo >/dev/null 2>&1; then
   MIMO_BIN="$(command -v mimo)"
   echo "==> Usando MiMo global: $MIMO_BIN"
 elif command -v mimo >/dev/null 2>&1 && [ "$USE_GLOBAL" != "true" ]; then
-  # mimo no PATH mas queremos sandbox? se já é global, reaproveita sem baixar.
+  # mimo encontrado no PATH sem --global: usa-o diretamente, sem baixar sandbox.
   MIMO_BIN="$(command -v mimo)"
   echo "==> mimo encontrado no PATH: $MIMO_BIN"
 else
@@ -63,7 +63,11 @@ else
       x86_64|amd64)  ARCH=x64 ;;
       *) echo "Arquitetura não suportada: $(uname -m)"; exit 1 ;;
     esac
-    VER="${MIMO_VERSION:-$(curl -fsSL https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/latest 2>/dev/null | tr -d '[:space:]' | sed 's/^v//')}"
+    VER="${MIMO_VERSION:-$(curl -fsSL https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/latest | tr -d '[:space:]' | sed 's/^v//')}"
+    if [ -z "$VER" ]; then
+      echo "Erro: não foi possível obter a versão do MiMo. Defina MIMO_VERSION manualmente."
+      exit 1
+    fi
     URL="https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/v${VER}/mimocode-${OS}-${ARCH}.tar.gz"
     echo "    versão $VER — baixando..."
     curl -fL# "$URL" -o /tmp/mimo.tar.gz
