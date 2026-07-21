@@ -25,6 +25,7 @@ export const REQUIRE_AUTH = process.env.MIMO_PROXY_REQUIRE_AUTH !== "false";
 export const MODE = (process.env.MIMO_PROXY_MODE || "raw").toLowerCase();
 export const RAW = MODE !== "agent";
 export const WATCHDOG_MS = Number(process.env.MIMO_PROXY_WATCHDOG_MS || 600_000);
+export const MAX_POOL_SIZE = Number(process.env.MIMO_PROXY_POOL_SIZE || 2);
 export const BODY_MAX_BYTES = 4 * 1024 * 1024; // ~1M tokens (~4 chars/token)
 
 const TOKEN = process.env.MIMO_PROXY_TOKEN;

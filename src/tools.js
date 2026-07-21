@@ -99,8 +99,6 @@ export function buildToolsSystemPrompt(tools, toolChoice) {
 
 function coerceParam(value, schema, paramName) {
   let v = value;
-  // Strip exactly one leading and one trailing newline if present,
-  // which are often added by LLMs for XML tag alignment.
   v = v.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
 
   const type = schema?.type;
@@ -116,11 +114,16 @@ function coerceParam(value, schema, paramName) {
     try {
       return JSON.parse(v);
     } catch {
-      return v;
+      // LLMs sometimes wrap JSON in markdown fences or add trailing commas — try to recover
+      const stripped = v.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+      try {
+        return JSON.parse(stripped);
+      } catch {
+        return v;
+      }
     }
   }
 
-  // Trim string parameters unless they are known to contain multi-line code/text
   const preserveWhitespaceParams = ["content", "text", "code", "newstring", "oldstring", "patch", "diff"];
   const nameLower = (paramName || "").toLowerCase();
   if (!preserveWhitespaceParams.includes(nameLower)) {
@@ -137,7 +140,6 @@ export function parseHermesToolCalls(text, tools) {
   const toolCalls = [];
   const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
   let m;
-  let content = text;
   while ((m = blockRe.exec(text)) !== null) {
     const inner = m[1];
     const fn = inner.match(/<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/);
@@ -157,7 +159,32 @@ export function parseHermesToolCalls(text, tools) {
       function: { name, arguments: JSON.stringify(args) },
     });
   }
-  content = text.replace(blockRe, "").trim();
+
+  let content = text.replace(blockRe, "").trim();
+
+  // Fallback: if no <tool_call> tags found, try parsing Hermes-style without wrappers
+  if (!toolCalls.length && content.includes("<function=")) {
+    const fnRe = /<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/g;
+    let fnMatch;
+    while ((fnMatch = fnRe.exec(content)) !== null) {
+      const name = fnMatch[1];
+      if (!schemaByName[name]) continue;
+      const params = schemaByName[name].properties || {};
+      const args = {};
+      const pRe = /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g;
+      let pm;
+      while ((pm = pRe.exec(fnMatch[2])) !== null) {
+        args[pm[1]] = coerceParam(pm[2], params[pm[1]], pm[1]);
+      }
+      toolCalls.push({
+        id: "call_" + Math.random().toString(36).slice(2, 12),
+        type: "function",
+        function: { name, arguments: JSON.stringify(args) },
+      });
+    }
+    if (toolCalls.length) content = content.replace(fnRe, "").trim();
+  }
+
   return { content, toolCalls };
 }
 

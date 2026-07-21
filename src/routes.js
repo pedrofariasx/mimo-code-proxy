@@ -7,6 +7,7 @@ import {
   DEFAULT_MODEL,
   RAW,
   WATCHDOG_MS,
+  MAX_POOL_SIZE,
 } from "./config.js";
 import { serverReq, openMiMoEvents } from "./mimo-client.js";
 import { isAuthorized, readBody, deny, bad } from "./auth.js";
@@ -33,8 +34,14 @@ const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000 });
 
 const MAX_MAP_ENTRIES = 500;
 
+function evictSet(set, max = MAX_MAP_ENTRIES) {
+  if (set.size > max) {
+    const iter = set.values();
+    for (let i = 0; i < max / 2; i++) set.delete(iter.next().value);
+  }
+}
+
 const sessionPool = [];
-const MAX_POOL_SIZE = 2;
 let isRefilling = false;
 
 export async function refillPool() {
@@ -204,8 +211,6 @@ export function handleChatCompletions(clientReq, clientRes) {
         );
         try {
           const resp = await serverReq("POST", `/session/${sid}/message`, msgBody);
-          // Pequena pausa para garantir a entrega de eventos finais no stream
-          await new Promise((resolve) => setTimeout(resolve, 50));
           subEvents.close();
 
           let text = extractText(resp.json);
@@ -534,7 +539,10 @@ export function handleChatCompletions(clientReq, clientRes) {
         .then((resp) => {
           if (finished) return;
           messageResponseText = extractText(resp.json);
-          setTimeout(() => finish("stop"), 100);
+          // Fallback: if session.idle doesn't fire within 500ms, finish anyway
+          setTimeout(() => {
+            if (!finished) finish("stop");
+          }, 500);
         })
         .catch((e) => {
           if (!finished) {
