@@ -65,8 +65,8 @@ else
     esac
     VER="${MIMO_VERSION:-$(curl -fsSL https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/latest 2>/dev/null | tr -d '[:space:]' | sed 's/^v//')}"
     URL="https://mimocode.cnbj1.mi-fds.com/mimocode/mimocode/releases/v${VER}/mimocode-${OS}-${ARCH}.tar.gz"
-    echo "    versão $VER de $URL"
-    curl -fsSL "$URL" -o /tmp/mimo.tar.gz
+    echo "    versão $VER — baixando..."
+    curl -fL# "$URL" -o /tmp/mimo.tar.gz
     tar -xzf /tmp/mimo.tar.gz -C "$SANDBOX"
     chmod +x "$SANDBOX/mimo"
     rm -f /tmp/mimo.tar.gz
