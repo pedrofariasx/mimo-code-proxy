@@ -8,6 +8,7 @@ import {
   RAW,
   WATCHDOG_MS,
   MAX_POOL_SIZE,
+  FALLBACK_MS,
 } from "./config.js";
 import { serverReq, openMiMoEvents } from "./mimo-client.js";
 import { isAuthorized, readBody, deny, bad } from "./auth.js";
@@ -104,6 +105,18 @@ async function releaseSession(sid, retries = 3) {
 
 // Inicializa o pool de sessões
 refillPool().catch(() => {});
+
+export async function drainPool() {
+  isRefilling = false;
+  const sids = sessionPool.splice(0);
+  await Promise.all(sids.map(async (sid) => {
+    try {
+      await serverReq("DELETE", `/session/${sid}`);
+    } catch {
+      // best-effort cleanup on shutdown
+    }
+  }));
+}
 
 export function reverseProxy(clientReq, clientRes) {
   const targetPath = clientReq.url;
@@ -392,10 +405,14 @@ export function handleChatCompletions(clientReq, clientRes) {
           sse(clientRes, openAIStreamUsage(chatId, model, created, usage));
 
           clientRes.write("data: [DONE]\n\n");
-        } catch {}
+        } catch (e) {
+          console.error("Erro ao enviar finish SSE:", e.message);
+        }
         try {
           if (events) events.close();
-        } catch {}
+        } catch (e) {
+          console.error("Erro ao fechar event stream:", e.message);
+        }
         clearTimeout(watchdog);
         releaseSession(sid);
         clientRes.end();
@@ -539,10 +556,9 @@ export function handleChatCompletions(clientReq, clientRes) {
         .then((resp) => {
           if (finished) return;
           messageResponseText = extractText(resp.json);
-          // Fallback: if session.idle doesn't fire within 500ms, finish anyway
           setTimeout(() => {
             if (!finished) finish("stop");
-          }, 500);
+          }, FALLBACK_MS);
         })
         .catch((e) => {
           if (!finished) {

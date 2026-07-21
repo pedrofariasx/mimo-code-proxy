@@ -1,3 +1,5 @@
+import { jsonrepair } from "jsonrepair";
+
 export function messageText(m) {
   if (typeof m.content === "string") return m.content;
   if (Array.isArray(m.content)) {
@@ -114,12 +116,15 @@ function coerceParam(value, schema, paramName) {
     try {
       return JSON.parse(v);
     } catch {
-      // LLMs sometimes wrap JSON in markdown fences or add trailing commas — try to recover
       const stripped = v.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
       try {
         return JSON.parse(stripped);
       } catch {
-        return v;
+        try {
+          return JSON.parse(jsonrepair(stripped));
+        } catch {
+          return v;
+        }
       }
     }
   }

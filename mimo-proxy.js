@@ -25,7 +25,7 @@ import {
 } from "./src/config.js";
 import { isAuthorized } from "./src/auth.js";
 import { openAIModels } from "./src/openai.js";
-import { reverseProxy, handleChatCompletions } from "./src/routes.js";
+import { reverseProxy, handleChatCompletions, drainPool } from "./src/routes.js";
 
 const server = http.createServer(async (clientReq, clientRes) => {
   // CORS Headers para permitir requisições de clientes web locais (ex: interfaces no navegador)
@@ -43,10 +43,32 @@ const server = http.createServer(async (clientReq, clientRes) => {
   const path = url.pathname;
 
   if (path === "/healthz") {
-    clientRes.writeHead(200, { "Content-Type": "application/json" });
-    clientRes.end(
-      JSON.stringify({ ok: true, upstream: SERVER_URL, ts: Date.now() }),
-    );
+    try {
+      const req = http.request({
+        method: "GET",
+        hostname: upstream.hostname,
+        port: upstream.port,
+        path: "/healthz",
+        timeout: 3000,
+        headers: SERVER_AUTH ? { authorization: SERVER_AUTH } : {},
+      });
+      const result = await new Promise((resolve, reject) => {
+        req.on("response", (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({ status: res.statusCode, ok: res.statusCode < 500 }));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+        req.end();
+      });
+      clientRes.writeHead(result.ok ? 200 : 502, { "Content-Type": "application/json" });
+      clientRes.end(JSON.stringify({ ok: result.ok, upstream: SERVER_URL, upstreamStatus: result.status, ts: Date.now() }));
+    } catch (e) {
+      clientRes.writeHead(502, { "Content-Type": "application/json" });
+      clientRes.end(JSON.stringify({ ok: false, upstream: SERVER_URL, error: e.message, ts: Date.now() }));
+    }
     return;
   }
 
@@ -133,8 +155,9 @@ server.listen(PORT, HOST, () => {
   );
 });
 
-function shutdown() {
+async function shutdown() {
   console.log("\nDesligando...");
+  await drainPool().catch(() => {});
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000);
 }
