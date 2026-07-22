@@ -336,7 +336,7 @@ export function parseHermesToolCalls(text, tools) {
 
   // 4) Strip known tool-call markup from content
   if (hasSchema) {
-    const nameRe = knownNames.join("|");
+    const nameRe = knownNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join("|");
     content = content.replace(new RegExp(`\\[Called (${nameRe}) with [^\\]]+\\]`, "g"), "").trim();
   } else {
     content = content.replace(/\[Called [^\]]+\]/g, "").trim();

@@ -33,7 +33,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
   clientRes.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN);
   clientRes.setHeader(
     "Access-Control-Allow-Headers",
-    clientReq.headers["access-control-request-headers"] || "*",
+    "Authorization, X-API-Key, Content-Type",
   );
   clientRes.setHeader(
     "Access-Control-Allow-Methods",
@@ -175,6 +175,7 @@ process.on("unhandledRejection", (reason) => {
 
 process.on("uncaughtException", (err) => {
   console.error("Uncaught Exception:", err.message || err);
+  process.exit(1);
 });
 
 process.on("SIGINT", shutdown);

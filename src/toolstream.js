@@ -56,7 +56,7 @@ function repairToolCallArgs(call) {
 export function stripToolCalls(text, knownNames = null) {
   if (!text) return text
   if (knownNames && knownNames.length > 0) {
-    const nameRe = knownNames.join('|')
+    const nameRe = knownNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
     let result = text
       .replace(new RegExp(`<tool_call>[\\s\\S]*?<function=(${nameRe})>[\\s\\S]*?<\\/tool_call>`, 'g'), '')
       .replace(new RegExp(`\\[Called (${nameRe}) with [^\\]]+\\]`, 'g'), '')

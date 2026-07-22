@@ -42,50 +42,69 @@ function evictSet(set, max = MAX_MAP_ENTRIES) {
 }
 
 const sessionPool = [];
-let isRefilling = false;
 let isDraining = false;
+let poolLock = false;
+const poolQueue = [];
 
-export async function refillPool(retries = 3) {
-  if (isRefilling || isDraining || sessionPool.length >= MAX_POOL_SIZE) return;
-  isRefilling = true;
-  try {
-    while (sessionPool.length < MAX_POOL_SIZE) {
-      const resp = await serverReq("POST", "/session", {
-        directory: process.cwd(),
-        name: "openai-bridge",
+async function withPoolLock(fn) {
+  if (poolLock) {
+    return new Promise((resolve, reject) => {
+      poolQueue.push(async () => {
+        try { resolve(await fn()); } catch (e) { reject(e); }
       });
-      const sid = resp.json?.id;
-      if (sid) {
-        sessionPool.push(sid);
-      } else {
-        break;
-      }
-    }
-  } catch (e) {
-    if (retries > 0) {
-      console.error(`Erro ao pre-criar sessão (${retries} retries left):`, e.message);
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!isDraining) refillPool(retries - 1).catch(() => {});
-    }
+    });
+  }
+  poolLock = true;
+  try {
+    return await fn();
   } finally {
-    isRefilling = false;
+    poolLock = false;
+    if (poolQueue.length > 0) poolQueue.shift()();
   }
 }
 
+export async function refillPool(retries = 3) {
+  await withPoolLock(async () => {
+    if (isDraining || sessionPool.length >= MAX_POOL_SIZE) return;
+    try {
+      while (sessionPool.length < MAX_POOL_SIZE) {
+        const resp = await serverReq("POST", "/session", {
+          directory: process.cwd(),
+          name: "openai-bridge",
+        });
+        const sid = resp.json?.id;
+        if (sid) {
+          sessionPool.push(sid);
+        } else {
+          break;
+        }
+      }
+    } catch (e) {
+      if (retries > 0) {
+        console.error(`Erro ao pre-criar sessao (${retries} retries left):`, e.message);
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!isDraining) refillPool(retries - 1).catch(() => {});
+      }
+    }
+  });
+}
+
 async function acquireSession() {
-  if (sessionPool.length > 0) {
-    const sid = sessionPool.shift();
+  return await withPoolLock(async () => {
+    if (sessionPool.length > 0) {
+      const sid = sessionPool.shift();
+      refillPool().catch(() => {});
+      return sid;
+    }
+    const resp = await serverReq("POST", "/session", {
+      directory: process.cwd(),
+      name: "openai-bridge",
+    });
+    const sid = resp.json?.id;
+    if (!sid) throw new Error("Sessao nao criada pelo MiMo");
     refillPool().catch(() => {});
     return sid;
-  }
-  const resp = await serverReq("POST", "/session", {
-    directory: process.cwd(),
-    name: "openai-bridge",
   });
-  const sid = resp.json?.id;
-  if (!sid) throw new Error("Sessão não criada pelo MiMo");
-  refillPool().catch(() => {});
-  return sid;
 }
 
 async function releaseSession(sid, retries = 3) {
@@ -98,7 +117,7 @@ async function releaseSession(sid, retries = 3) {
       if (i < retries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
     }
   }
-  console.error(`Falha ao deletar sessão ${sid} após ${retries} tentativas`);
+  console.error(`Falha ao deletar sessao ${sid} apos ${retries} tentativas`);
 }
 
 refillPool().catch(() => {});

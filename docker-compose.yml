@@ -5,6 +5,7 @@ services:
       - "${MIMO_PROXY_PORT:-8787}:8787"
     env_file:
       - .env
+    restart: unless-stopped
     volumes:
       - mimo-sandbox:/app/sandbox
 
