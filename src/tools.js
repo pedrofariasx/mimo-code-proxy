@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { jsonrepair } from "jsonrepair";
+import { parseToolCalls } from "./toolstream.js";
 
 export function messageText(m) {
   if (typeof m.content === "string") return m.content;
@@ -255,59 +256,109 @@ export function parseCalledBlocks(text, schemaByName) {
 
 export function parseHermesToolCalls(text, tools) {
   const schemaByName = {};
+  const knownNames = [];
   for (const t of tools || []) {
-    if (t?.function?.name) schemaByName[t.function.name] = t.function.parameters;
+    if (t?.function?.name) {
+      schemaByName[t.function.name] = t.function.parameters;
+      knownNames.push(t.function.name);
+    }
   }
 
+  const hasSchema = Object.keys(schemaByName).length > 0;
   const toolCalls = [];
+  const seen = new Set();
+
+  // 1) Parse <tool_call> blocks with the battle-tested parser
   const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
   let m;
   while ((m = blockRe.exec(text)) !== null) {
     const parsed = parseXMLToolBlock(m[1], schemaByName);
-    if (parsed) toolCalls.push(parsed);
+    if (parsed) {
+      toolCalls.push(parsed);
+      seen.add(JSON.stringify(parsed.function));
+    }
   }
 
+  // 2) Parse bare <function=…> blocks (no <tool_call> wrapper)
   let content = text.replace(blockRe, "").trim();
-
-  if (!toolCalls.length && content.includes("<function=")) {
+  if (content.includes("<function=")) {
     const fnRe = /<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/g;
     let fnMatch;
     const spans = [];
     while ((fnMatch = fnRe.exec(content)) !== null) {
       const parsed = parseXMLToolBlock(fnMatch[0], schemaByName);
-      if (parsed) {
+      if (parsed && !seen.has(JSON.stringify(parsed.function))) {
         toolCalls.push(parsed);
-        spans.push({ start: fnMatch.index, end: fnRe.lastIndex });
+        seen.add(JSON.stringify(parsed.function));
+        spans.push({ start: fnMatch.index, end: fnMatch.index + fnMatch[0].length });
       }
     }
-    if (toolCalls.length) {
-      let result = "";
+    if (spans.length) {
+      let cleaned = "";
       let last = 0;
       for (const s of spans) {
-        result += content.slice(last, s.start);
+        cleaned += content.slice(last, s.start);
         last = s.end;
       }
-      result += content.slice(last);
-      content = result.trim();
+      cleaned += content.slice(last);
+      content = cleaned.trim();
     }
   }
 
-  if (!toolCalls.length && content.includes("[Called ")) {
-    const blocks = parseCalledBlocks(content, schemaByName);
-    if (blocks.length) {
-      for (const b of blocks) toolCalls.push(b.toolCall);
-      let result = "";
-      let last = 0;
-      for (const b of blocks) {
-        result += content.slice(last, b.start);
-        last = b.end;
+  // 3) Parse [Called …] blocks via ToolStream (handles edge cases)
+  if (content.includes("[Called ")) {
+    const textForTS = content.replace(/<function=[\s\S]*?<\/function>/g, "");
+    if (textForTS.includes("[Called ")) {
+      const fromTS = parseToolCalls(textForTS)
+        .filter((tc) => !hasSchema || schemaByName[tc.name])
+        .map((tc) => {
+          const lc = {
+            id: tc.id,
+            type: "function",
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(
+                hasSchema && schemaByName[tc.name]
+                  ? coerceToolCallArgs(tc.name, tc.arguments, schemaByName)
+                  : tc.arguments,
+              ),
+            },
+          };
+          return lc;
+        })
+        .filter((tc) => !seen.has(JSON.stringify(tc.function)));
+      for (const tc of fromTS) {
+        toolCalls.push(tc);
+        seen.add(JSON.stringify(tc.function));
       }
-      result += content.slice(last);
-      content = result.trim();
     }
   }
+
+  // 4) Strip known tool-call markup from content
+  if (hasSchema) {
+    const nameRe = knownNames.join("|");
+    content = content.replace(new RegExp(`\\[Called (${nameRe}) with [^\\]]+\\]`, "g"), "").trim();
+  } else {
+    content = content.replace(/\[Called [^\]]+\]/g, "").trim();
+  }
+  content = content.replace(/<function=[\s\S]*?<\/function>/g, "").trim();
 
   return { content, toolCalls };
+}
+
+function coerceToolCallArgs(name, args, schemaByName) {
+  const schema = schemaByName[name];
+  if (!schema?.properties) return args;
+  const coerced = { ...args };
+  for (const [key, value] of Object.entries(coerced)) {
+    if (typeof value === "string") {
+      const propSchema = schema.properties[key];
+      if (propSchema?.type) {
+        coerced[key] = coerceParam(value, propSchema, key);
+      }
+    }
+  }
+  return coerced;
 }
 
 export function findCompleteToolBlocks(text, schemaByName) {
