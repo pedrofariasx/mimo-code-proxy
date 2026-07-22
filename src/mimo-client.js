@@ -1,14 +1,33 @@
 import http from "node:http";
 import { upstream, SERVER_AUTH } from "./config.js";
 
-const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000 });
+const agent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10000,
+  noDelay: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+});
 
+/**
+ * Constrói os cabeçalhos padrão para autenticação e envio de requisições ao servidor MiMo.
+ * @param {Record<string, string>} [extra={}]
+ * @returns {Record<string, string>}
+ */
 export function serverHeaders(extra = {}) {
   const h = { ...extra, host: upstream.host };
   if (SERVER_AUTH) h["authorization"] = SERVER_AUTH;
   return h;
 }
 
+/**
+ * Envia uma requisição HTTP para o servidor MiMo upstream e retorna a resposta analisada.
+ * @param {string} method
+ * @param {string} path
+ * @param {any} [body]
+ * @param {Record<string, string>} [headers]
+ * @returns {Promise<{status: number, json: any, raw: string}>}
+ */
 export function serverReq(method, path, body, headers) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
@@ -47,6 +66,12 @@ export function serverReq(method, path, body, headers) {
   });
 }
 
+/**
+ * Abre uma conexão SSE com o endpoint `/event` do MiMo com suporte a reconexão automática (backoff).
+ * @param {(evt: any) => void} onEvent
+ * @param {(err: Error) => void} [onError]
+ * @returns {{close: () => void}}
+ */
 export function openMiMoEvents(onEvent, onError) {
   let activeReq = null;
   let closed = false;

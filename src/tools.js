@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { jsonrepair } from "jsonrepair";
 
 export function messageText(m) {
@@ -37,8 +38,8 @@ export function buildConversation(messages, raw) {
       if (text) turns.push(raw ? `Human:\n${text}` : text);
     }
   }
-  const system = systemParts.join("\n\n") || undefined;
-  const transcript = turns.join("\n\n");
+  const system = systemParts.join("\n") || undefined;
+  const transcript = turns.join(raw ? "\n\n" : "\n");
   return { system, parts: [{ type: "text", text: transcript }] };
 }
 
@@ -46,20 +47,20 @@ export function normalizeToolXML(text) {
   if (!text || text.indexOf("<") === -1) return text;
   let t = text;
   t = t.replace(
-    /<function=([a-zA-Z0-9_]+)\s*>([\s\S]*?)<\/function>/g,
+    /<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/g,
     (m, name, inner) => {
       const body = inner.replace(
-        /<parameter=([a-zA-Z0-9_]+)\s*>([\s\S]*?)<\/parameter>/g,
+        /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g,
         (mm, p, v) => `<${p}>${v}</${p}>`,
       );
       return `<${name}>${body}</${name}>`;
     },
   );
   t = t.replace(
-    /<function_name>\s*([a-zA-Z0-9_]+)\s*<\/function_name>([\s\S]*?)(?=<\/tool_call>|$)/g,
+    /<function_name>\s*([a-zA-Z0-9_.-]+)\s*<\/function_name>([\s\S]*?)(?=<\/tool_call>|$)/g,
     (m, name, inner) => {
       const body = inner.replace(
-        /<param\s+name=["']([a-zA-Z0-9_]+)["']\s*>([\s\S]*?)<\/param>/g,
+        /<param\s+name=["']([a-zA-Z0-9_.-]+)["']\s*>([\s\S]*?)<\/param>/g,
         (mm, p, v) => `<${p}>${v}</${p}>`,
       );
       return `<${name}>${body}</${name}>`;
@@ -99,6 +100,34 @@ export function buildToolsSystemPrompt(tools, toolChoice) {
   ].join("\n");
 }
 
+export function extractBalancedJSON(str, startIdx) {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = startIdx; i < str.length; i++) {
+    const ch = str[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) return str.slice(startIdx, i + 1);
+    }
+  }
+  return null;
+}
+
 function coerceParam(value, schema, paramName) {
   let v = value;
   v = v.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
@@ -129,7 +158,11 @@ function coerceParam(value, schema, paramName) {
     }
   }
 
-  const preserveWhitespaceParams = ["content", "text", "code", "newstring", "oldstring", "patch", "diff"];
+  const preserveWhitespaceParams = [
+    "content", "text", "code", "newstring", "oldstring",
+    "patch", "diff", "file_text", "new_string", "old_string",
+    "new_str", "old_str", "replacement", "search",
+  ];
   const nameLower = (paramName || "").toLowerCase();
   if (!preserveWhitespaceParams.includes(nameLower)) {
     v = v.trim();
@@ -137,82 +170,181 @@ function coerceParam(value, schema, paramName) {
   return v;
 }
 
+function parseXMLToolBlock(inner, schemaByName) {
+  const fn = inner.match(/<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/);
+  if (!fn) return null;
+  const name = fn[1];
+  if (schemaByName && Object.keys(schemaByName).length > 0 && !schemaByName[name]) return null;
+  const params = schemaByName?.[name]?.properties || {};
+  const args = {};
+  const body = fn[2];
+  const openCount = (body.match(/<parameter=[a-zA-Z0-9_.-]+\s*>/g) || []).length;
+  const closeCount = (body.match(/<\/parameter>/g) || []).length;
+  if (openCount !== closeCount) return null;
+  const paramRe = /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g;
+  let pm;
+  while ((pm = paramRe.exec(body)) !== null) {
+    const pName = pm[1];
+    args[pName] = coerceParam(pm[2], params[pName], pName);
+  }
+  return {
+    id: "call_" + crypto.randomBytes(8).toString("hex"),
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  };
+}
+
+export function parseCalledBlocks(text, schemaByName) {
+  const results = [];
+  const marker = "[Called ";
+  let searchFrom = 0;
+  while (true) {
+    const idx = text.indexOf(marker, searchFrom);
+    if (idx === -1) break;
+    const nameStart = idx + marker.length;
+    const nameMatch = text.slice(nameStart).match(/^([a-zA-Z0-9_.-]+)\s+with\s+/);
+    if (!nameMatch) {
+      searchFrom = idx + 1;
+      continue;
+    }
+    const name = nameMatch[1];
+    const jsonStart = nameStart + nameMatch[0].length;
+    if (text[jsonStart] !== "{") {
+      searchFrom = idx + 1;
+      continue;
+    }
+    const jsonStr = extractBalancedJSON(text, jsonStart);
+    if (!jsonStr) {
+      searchFrom = idx + 1;
+      continue;
+    }
+    const endBracket = text.indexOf("]", jsonStart + jsonStr.length);
+    if (endBracket === -1) {
+      searchFrom = idx + 1;
+      continue;
+    }
+    const fullEnd = endBracket + 1;
+    if (schemaByName && Object.keys(schemaByName).length > 0 && !schemaByName[name]) {
+      searchFrom = fullEnd;
+      continue;
+    }
+    let args;
+    try {
+      args = JSON.parse(jsonStr);
+    } catch {
+      try {
+        args = JSON.parse(jsonrepair(jsonStr));
+      } catch {
+        searchFrom = fullEnd;
+        continue;
+      }
+    }
+    results.push({
+      start: idx,
+      end: fullEnd,
+      toolCall: {
+        id: "call_" + crypto.randomBytes(8).toString("hex"),
+        type: "function",
+        function: { name, arguments: JSON.stringify(args) },
+      },
+    });
+    searchFrom = fullEnd;
+  }
+  return results;
+}
+
 export function parseHermesToolCalls(text, tools) {
   const schemaByName = {};
   for (const t of tools || []) {
     if (t?.function?.name) schemaByName[t.function.name] = t.function.parameters;
   }
+
   const toolCalls = [];
   const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
   let m;
   while ((m = blockRe.exec(text)) !== null) {
-    const inner = m[1];
-    const fn = inner.match(/<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/);
-    if (!fn) continue;
-    const name = fn[1];
-    const params = schemaByName[name]?.properties || {};
-    const args = {};
-    const paramRe = /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g;
-    let pm;
-    while ((pm = paramRe.exec(fn[2])) !== null) {
-      const pName = pm[1];
-      args[pName] = coerceParam(pm[2], params[pName], pName);
-    }
-    toolCalls.push({
-      id: "call_" + Math.random().toString(36).slice(2, 12),
-      type: "function",
-      function: { name, arguments: JSON.stringify(args) },
-    });
+    const parsed = parseXMLToolBlock(m[1], schemaByName);
+    if (parsed) toolCalls.push(parsed);
   }
 
   let content = text.replace(blockRe, "").trim();
 
-  // Fallback: if no <tool_call> tags found, try parsing Hermes-style without wrappers
   if (!toolCalls.length && content.includes("<function=")) {
     const fnRe = /<function=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/function>/g;
     let fnMatch;
+    const spans = [];
     while ((fnMatch = fnRe.exec(content)) !== null) {
-      const name = fnMatch[1];
-      if (!schemaByName[name]) continue;
-      const params = schemaByName[name].properties || {};
-      const args = {};
-      const pRe = /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/g;
-      let pm;
-      while ((pm = pRe.exec(fnMatch[2])) !== null) {
-        args[pm[1]] = coerceParam(pm[2], params[pm[1]], pm[1]);
+      const parsed = parseXMLToolBlock(fnMatch[0], schemaByName);
+      if (parsed) {
+        toolCalls.push(parsed);
+        spans.push({ start: fnMatch.index, end: fnRe.lastIndex });
       }
-      toolCalls.push({
-        id: "call_" + Math.random().toString(36).slice(2, 12),
-        type: "function",
-        function: { name, arguments: JSON.stringify(args) },
-      });
     }
-    if (toolCalls.length) content = content.replace(fnRe, "").trim();
+    if (toolCalls.length) {
+      let result = "";
+      let last = 0;
+      for (const s of spans) {
+        result += content.slice(last, s.start);
+        last = s.end;
+      }
+      result += content.slice(last);
+      content = result.trim();
+    }
   }
 
-  // Fallback: parse [Called name with {json}] format
   if (!toolCalls.length && content.includes("[Called ")) {
-    const calledRe = /\[Called\s+([a-zA-Z0-9_.-]+)\s+with\s+(\{[^}]*\})\]/g;
-    let cm;
-    while ((cm = calledRe.exec(content)) !== null) {
-      const name = cm[1];
-      if (!schemaByName[name]) continue;
-      let args;
-      try { args = JSON.parse(cm[2]); }
-      catch {
-        try { args = JSON.parse(jsonrepair(cm[2])); }
-        catch { continue; }
+    const blocks = parseCalledBlocks(content, schemaByName);
+    if (blocks.length) {
+      for (const b of blocks) toolCalls.push(b.toolCall);
+      let result = "";
+      let last = 0;
+      for (const b of blocks) {
+        result += content.slice(last, b.start);
+        last = b.end;
       }
-      toolCalls.push({
-        id: "call_" + Math.random().toString(36).slice(2, 12),
-        type: "function",
-        function: { name, arguments: JSON.stringify(args) },
-      });
+      result += content.slice(last);
+      content = result.trim();
     }
-    if (toolCalls.length) content = content.replace(calledRe, "").trim();
   }
 
   return { content, toolCalls };
+}
+
+export function findCompleteToolBlocks(text, schemaByName) {
+  const blocks = [];
+  const blockRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  let m;
+  while ((m = blockRe.exec(text)) !== null) {
+    const parsed = parseXMLToolBlock(m[1], schemaByName);
+    if (parsed) {
+      blocks.push({ start: m.index, end: blockRe.lastIndex, type: "xml", toolCall: parsed });
+    }
+  }
+  const calledBlocks = parseCalledBlocks(text, schemaByName);
+  for (const b of calledBlocks) {
+    blocks.push({ start: b.start, end: b.end, type: "called", toolCall: b.toolCall });
+  }
+  blocks.sort((a, b) => a.start - b.start);
+  return blocks;
+}
+
+export function hasIncompleteToolBlock(text) {
+  const lastOpen = text.lastIndexOf("<tool_call>");
+  if (lastOpen !== -1) {
+    const afterOpen = text.slice(lastOpen);
+    if (!afterOpen.includes("</tool_call>")) return true;
+  }
+  const lastCalled = text.lastIndexOf("[Called ");
+  if (lastCalled !== -1) {
+    const afterCalled = text.slice(lastCalled);
+    if (!afterCalled.includes("]")) return true;
+    const jsonStart = afterCalled.indexOf("{");
+    if (jsonStart !== -1) {
+      const jsonStr = extractBalancedJSON(afterCalled, jsonStart);
+      if (!jsonStr) return true;
+    }
+  }
+  return false;
 }
 
 export function formatToolPart(part) {

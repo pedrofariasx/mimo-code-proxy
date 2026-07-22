@@ -1,13 +1,27 @@
+import crypto from "node:crypto";
 import { mimoModels } from "./config.js";
 
+/**
+ * Gera um ID de chat aleatório compatível com a API da OpenAI.
+ * @returns {string}
+ */
 export function genId() {
-  return "chatcmpl-" + Math.random().toString(36).slice(2, 12);
+  return "chatcmpl-" + crypto.randomBytes(12).toString("hex");
 }
 
+/**
+ * Escreve um evento SSE no formato OpenAI no stream da resposta.
+ * @param {import("node:http").ServerResponse} res
+ * @param {object} obj
+ */
 export function sse(res, obj) {
   res.write("data: " + JSON.stringify(obj) + "\n\n");
 }
 
+/**
+ * Retorna a lista de modelos suportados no formato de resposta da OpenAI GET /v1/models.
+ * @returns {object}
+ */
 export function openAIModels() {
   return {
     object: "list",
@@ -21,6 +35,11 @@ export function openAIModels() {
   };
 }
 
+/**
+ * Extrai e concatena todas as partes de texto da resposta JSON do MiMo.
+ * @param {object} mimoJson
+ * @returns {string}
+ */
 export function extractText(mimoJson) {
   if (!mimoJson || !Array.isArray(mimoJson.parts)) return "";
   return mimoJson.parts
@@ -29,9 +48,16 @@ export function extractText(mimoJson) {
     .join("");
 }
 
-export function estimateTokens(text) {
-  if (!text) return 0;
-  return Math.ceil(text.length / 3.8);
+/**
+ * Estima a quantidade de tokens para um texto ou contagem de caracteres.
+ * @param {string|number} input
+ * @returns {number}
+ */
+export function estimateTokens(input) {
+  if (!input) return 0;
+  if (typeof input === "number") return Math.ceil(input / 3.8);
+  if (typeof input === "string") return Math.ceil(input.length / 3.8);
+  return 0;
 }
 
 export function calculateUsage(promptMessages, completionText, toolCalls) {

@@ -7,7 +7,9 @@
     "mimo-proxy": "mimo-proxy.js"
   },
   "scripts": {
-    "start": "node mimo-proxy.js"
+    "start": "node mimo-proxy.js",
+    "lint": "node --check mimo-proxy.js src/*.js test/*.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

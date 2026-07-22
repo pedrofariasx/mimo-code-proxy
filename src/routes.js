@@ -29,10 +29,17 @@ import {
   normalizeToolXML,
   parseHermesToolCalls,
   formatToolPart,
+  findCompleteToolBlocks,
+  hasIncompleteToolBlock,
 } from "./tools.js";
-import { jsonrepair } from "jsonrepair";
 
-const agent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000 });
+const agent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10000,
+  noDelay: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+});
 
 const MAX_MAP_ENTRIES = 500;
 
@@ -92,7 +99,6 @@ async function acquireSession() {
 
 async function releaseSession(sid, retries = 3) {
   if (!sid) return;
-  // Always delete used sessions — never return to pool (sessions have accumulated state)
   for (let i = 0; i < retries; i++) {
     try {
       await serverReq("DELETE", `/session/${sid}`);
@@ -104,7 +110,6 @@ async function releaseSession(sid, retries = 3) {
   console.error(`Falha ao deletar sessão ${sid} após ${retries} tentativas`);
 }
 
-// Inicializa o pool de sessões
 refillPool().catch(() => {});
 
 export async function drainPool() {
@@ -176,7 +181,7 @@ export function handleChatCompletions(clientReq, clientRes) {
       let sys = system || "";
       if (clientTools) {
         const toolsPrompt = buildToolsSystemPrompt(clientTools, body.tool_choice);
-        sys = sys ? sys + "\n\n" + toolsPrompt : toolsPrompt;
+        sys = sys ? sys + "\n" + toolsPrompt : toolsPrompt;
       }
       if (RAW) {
         msgBody.tools = { "*": false };
@@ -208,7 +213,6 @@ export function handleChatCompletions(clientReq, clientRes) {
       const created = Math.floor(Date.now() / 1000);
       const chatId = genId();
 
-      // ---------- Não-streaming ----------
       if (!stream) {
         let tokensIn = 0;
         let tokensOut = 0;
@@ -264,6 +268,9 @@ export function handleChatCompletions(clientReq, clientRes) {
       }
 
       // ---------- Streaming ----------
+      if (clientRes.socket) {
+        clientRes.socket.setNoDelay(true);
+      }
       clientRes.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -271,22 +278,34 @@ export function handleChatCompletions(clientReq, clientRes) {
         "Transfer-Encoding": "chunked",
         "X-Accel-Buffering": "no",
       });
+      if (typeof clientRes.flushHeaders === "function") {
+        clientRes.flushHeaders();
+      }
       sse(clientRes, openAIDelta(chatId, model, created, null, "role"));
 
       let finished = false;
-      const sentLen = new Map();
+      let sentNormLen = 0;
       const reasonLen = new Map();
       const reasonBuf = new Map();
       const partTypes = new Map();
       const toolAnnounced = new Set();
       const userMsgIds = new Set();
       const textBuf = new Map();
+      let cachedFullText = "";
+      let fullTextStale = false;
       let messageResponseText = null;
       let events = null;
 
+      const schemaByName = {};
+      if (clientTools) {
+        for (const t of clientTools) {
+          if (t?.function?.name) schemaByName[t.function.name] = t.function.parameters;
+        }
+      }
+
       const streamState = {
         sentTextLength: 0,
-        sentToolCallsCount: 0,
+        sentBlockEnds: [],
         totalToolCallsSent: 0,
         allToolCalls: [],
         cleanText: "",
@@ -294,100 +313,77 @@ export function handleChatCompletions(clientReq, clientRes) {
         total_tokens_out: 0,
       };
 
+      function getFullText() {
+        if (fullTextStale) {
+          cachedFullText = [...textBuf.values()].join("");
+          fullTextStale = false;
+        }
+        return cachedFullText;
+      }
+
       const streamProgress = (fullText, isFinal = false) => {
-        let lastTextEnd = 0;
+        const hasToolTags = fullText.includes("<tool_call>") ||
+          (clientTools && fullText.includes("[Called "));
+
+        if (!hasToolTags) {
+          if (fullText.length > streamState.sentTextLength) {
+            const delta = fullText.slice(streamState.sentTextLength);
+            streamState.sentTextLength = fullText.length;
+            streamState.cleanText = fullText;
+            sse(clientRes, openAIDelta(chatId, model, created, delta));
+          }
+          return;
+        }
+
+        const blocks = findCompleteToolBlocks(fullText, schemaByName);
+
         let cleanText = "";
-        const matches = [];
-        const patterns = [];
-
-        // Collect <tool_call> blocks
-        const blockRe = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/g;
-        let m;
-        while ((m = blockRe.exec(fullText)) !== null) {
-          patterns.push({
-            start: m.index,
-            end: blockRe.lastIndex,
-            type: "xml",
-            inner: m[1],
-            isComplete: m[0].endsWith("</tool_call>") || isFinal,
-          });
+        let lastEnd = 0;
+        for (const b of blocks) {
+          cleanText += fullText.slice(lastEnd, b.start);
+          lastEnd = b.end;
         }
 
-        // Collect [Called name with {json}] blocks
-        if (clientTools) {
-          const schemaByName = {};
-          for (const t of clientTools) {
-            if (t?.function?.name) schemaByName[t.function.name] = t.function.parameters;
+        const incomplete = !isFinal && hasIncompleteToolBlock(fullText);
+        if (incomplete) {
+          const lastOpen = Math.max(
+            fullText.lastIndexOf("<tool_call>"),
+            fullText.lastIndexOf("[Called ")
+          );
+          if (lastOpen > lastEnd) {
+            cleanText += fullText.slice(lastEnd, lastOpen);
+          } else {
+            cleanText += fullText.slice(lastEnd);
           }
-          const calledRe = /\[Called\s+([a-zA-Z0-9_.-]+)\s+with\s+(\{[^}]*\})\]/g;
-          let cm;
-          while ((cm = calledRe.exec(fullText)) !== null) {
-            if (schemaByName[cm[1]]) {
-              patterns.push({
-                start: cm.index,
-                end: calledRe.lastIndex,
-                type: "called",
-                name: cm[1],
-                argsStr: cm[2],
-                isComplete: true,
-              });
-            }
-          }
-        }
-
-        // Sort by position and build cleanText + matches
-        patterns.sort((a, b) => a.start - b.start);
-        for (const p of patterns) {
-          cleanText += fullText.slice(lastTextEnd, p.start);
-          matches.push(p);
-          lastTextEnd = p.end;
-        }
-        if (lastTextEnd < fullText.length) {
-          cleanText += fullText.slice(lastTextEnd);
+        } else {
+          cleanText += fullText.slice(lastEnd);
         }
 
         streamState.cleanText = cleanText;
 
-        // 1. Stream new text content
         if (cleanText.length > streamState.sentTextLength) {
           const delta = cleanText.slice(streamState.sentTextLength);
           streamState.sentTextLength = cleanText.length;
           sse(clientRes, openAIDelta(chatId, model, created, delta));
         }
 
-        // 2. Stream completed tool calls
-        for (let i = 0; i < matches.length; i++) {
-          const match = matches[i];
-          if (!match.isComplete || i < streamState.sentToolCallsCount) continue;
+        const sentEnds = streamState.sentBlockEnds;
+        for (const block of blocks) {
+          if (sentEnds.includes(block.end)) continue;
 
-          let toolCalls = [];
-          if (match.type === "xml") {
-            const parsed = parseHermesToolCalls("<tool_call>" + match.inner + "</tool_call>", clientTools);
-            toolCalls = parsed.toolCalls || [];
-          } else if (match.type === "called") {
-            let args;
-            try { args = JSON.parse(match.argsStr); }
-            catch {
-              try { args = JSON.parse(jsonrepair(match.argsStr)); }
-              catch { continue; }
-            }
-            toolCalls = [{
-              id: "call_" + Math.random().toString(36).slice(2, 12),
-              type: "function",
-              function: { name: match.name, arguments: JSON.stringify(args) },
-            }];
-          }
+          const tc = block.toolCall;
+          if (!tc) continue;
 
-          if (toolCalls.length) {
-            const deltas = toolCalls.map((tc, idx) => ({
-              index: streamState.totalToolCallsSent + idx,
-              ...tc,
-            }));
-            for (const tc of toolCalls) streamState.allToolCalls.push(tc);
-            sse(clientRes, openAIDeltaRaw(chatId, model, created, { tool_calls: deltas }));
-            streamState.totalToolCallsSent += toolCalls.length;
-          }
-          streamState.sentToolCallsCount = i + 1;
+          const delta = [{
+            index: streamState.totalToolCallsSent,
+            id: tc.id,
+            type: tc.type,
+            function: tc.function,
+          }];
+          streamState.allToolCalls.push(tc);
+          sse(clientRes, openAIDeltaRaw(chatId, model, created, { tool_calls: delta }));
+          streamState.totalToolCallsSent++;
+          sentEnds.push(block.end);
         }
       };
 
@@ -395,7 +391,7 @@ export function handleChatCompletions(clientReq, clientRes) {
         if (finished) return;
         finished = true;
 
-        const textFromEvents = textBuf.size ? [...textBuf.values()].join("") : null;
+        const textFromEvents = textBuf.size ? getFullText() : null;
         const full = textFromEvents || messageResponseText || "";
         textBuf.clear();
 
@@ -412,18 +408,16 @@ export function handleChatCompletions(clientReq, clientRes) {
             }
           } else {
             const norm = normalizeToolXML(full);
-            const prev = sentLen.get("norm") || 0;
-            if (norm.length > prev) {
-              const delta = norm.slice(prev);
-              sentLen.set("norm", norm.length);
+            if (norm.length > sentNormLen) {
+              const delta = norm.slice(sentNormLen);
+              sentNormLen = norm.length;
               sse(clientRes, openAIDelta(chatId, model, created, delta));
             }
             finalText = norm;
           }
         } else if (messageResponseText) {
-          const already = [...sentLen.values()].reduce((a, b) => a + b, 0);
-          if (messageResponseText.length > already) {
-            sse(clientRes, openAIDelta(chatId, model, created, messageResponseText.slice(already)));
+          if (messageResponseText.length > sentNormLen) {
+            sse(clientRes, openAIDelta(chatId, model, created, messageResponseText.slice(sentNormLen)));
           }
           finalText = messageResponseText;
         } else {
@@ -483,16 +477,14 @@ export function handleChatCompletions(clientReq, clientRes) {
           if (part.type === "text" && typeof part.text === "string") {
             partTypes.set(part.id, "text");
             textBuf.set(part.id, part.text);
+            fullTextStale = true;
             if (RAW && clientTools) {
-              const fullText = [...textBuf.values()].join("");
-              streamProgress(fullText, false);
+              streamProgress(getFullText(), false);
             } else {
-              const fullText = [...textBuf.values()].join("");
-              const norm = RAW ? normalizeToolXML(fullText) : fullText;
-              const prev = sentLen.get("norm") || 0;
-              if (norm.length > prev) {
-                const delta = norm.slice(prev);
-                sentLen.set("norm", norm.length);
+              const norm = RAW ? normalizeToolXML(getFullText()) : getFullText();
+              if (norm.length > sentNormLen) {
+                const delta = norm.slice(sentNormLen);
+                sentNormLen = norm.length;
                 sse(clientRes, openAIDelta(chatId, model, created, delta));
               }
             }
@@ -554,15 +546,14 @@ export function handleChatCompletions(clientReq, clientRes) {
           if (pType === "text") {
             const prev = textBuf.get(partID) || "";
             textBuf.set(partID, prev + deltaText);
-            const fullText = [...textBuf.values()].join("");
+            fullTextStale = true;
             if (RAW && clientTools) {
-              streamProgress(fullText, false);
+              streamProgress(getFullText(), false);
             } else {
-              const norm = RAW ? normalizeToolXML(fullText) : fullText;
-              const plen = sentLen.get("norm") || 0;
-              if (norm.length > plen) {
-                const d = norm.slice(plen);
-                sentLen.set("norm", norm.length);
+              const norm = RAW ? normalizeToolXML(getFullText()) : getFullText();
+              if (norm.length > sentNormLen) {
+                const d = norm.slice(sentNormLen);
+                sentNormLen = norm.length;
                 sse(clientRes, openAIDelta(chatId, model, created, d));
               }
             }
@@ -612,6 +603,9 @@ export function handleChatCompletions(clientReq, clientRes) {
         });
     })
     .catch((e) => {
-      return bad(clientRes, "JSON inválido: " + e.message);
+      if (e.message === "Body too large") {
+        return bad(clientRes, "Payload muito grande (máximo 4MB)", 413);
+      }
+      return bad(clientRes, "JSON inválido: " + e.message, 400);
     });
 }

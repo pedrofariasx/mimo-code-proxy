@@ -30,11 +30,18 @@ import { reverseProxy, handleChatCompletions, drainPool } from "./src/routes.js"
 const server = http.createServer(async (clientReq, clientRes) => {
   // CORS Headers para permitir requisições de clientes web locais (ex: interfaces no navegador)
   clientRes.setHeader("Access-Control-Allow-Origin", "*");
-  clientRes.setHeader("Access-Control-Allow-Headers", "*");
-  clientRes.setHeader("Access-Control-Allow-Methods", "*");
+  clientRes.setHeader(
+    "Access-Control-Allow-Headers",
+    clientReq.headers["access-control-request-headers"] || "*",
+  );
+  clientRes.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+  );
+  clientRes.setHeader("Access-Control-Max-Age", "86400");
 
   if (clientReq.method === "OPTIONS") {
-    clientRes.writeHead(200);
+    clientRes.writeHead(204);
     clientRes.end();
     return;
   }
@@ -161,5 +168,13 @@ async function shutdown() {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000);
 }
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Promise Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err.message || err);
+});
+
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

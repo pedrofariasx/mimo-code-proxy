@@ -1,14 +1,26 @@
 import { URL } from "node:url";
+import crypto from "node:crypto";
 import { TOKEN, REQUIRE_AUTH, BODY_MAX_BYTES } from "./config.js";
 
-function safeCompare(a, b) {
+/**
+ * Realiza comparação em tempo constante de duas strings para evitar timing attacks.
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function safeCompare(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
-  if (a.length !== b.length) return false;
-  return (
-    a.split("").reduce((acc, c, i) => acc | (c.charCodeAt(0) ^ b.charCodeAt(i)), 0) === 0
-  );
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
+/**
+ * Verifica se a requisição HTTP contém credenciais válidas.
+ * @param {import("node:http").IncomingMessage} req
+ * @returns {boolean}
+ */
 export function isAuthorized(req) {
   if (!REQUIRE_AUTH) return true;
   const key = req.headers["x-api-key"];
@@ -23,6 +35,12 @@ export function isAuthorized(req) {
   return false;
 }
 
+/**
+ * Lê e analisa o corpo JSON de uma requisição HTTP respeitando o limite máximo em bytes.
+ * @param {import("node:http").IncomingMessage} req
+ * @param {number} [maxSize=BODY_MAX_BYTES]
+ * @returns {Promise<any>}
+ */
 export function readBody(req, maxSize = BODY_MAX_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -48,11 +66,21 @@ export function readBody(req, maxSize = BODY_MAX_BYTES) {
   });
 }
 
+/**
+ * Responde com 401 Unauthorized.
+ * @param {import("node:http").ServerResponse} res
+ */
 export function deny(res) {
   res.writeHead(401, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Unauthorized" }));
 }
 
+/**
+ * Responde com erro customizado (padrão 400 Bad Request).
+ * @param {import("node:http").ServerResponse} res
+ * @param {string} msg
+ * @param {number} [code=400]
+ */
 export function bad(res, msg, code = 400) {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: msg }));
