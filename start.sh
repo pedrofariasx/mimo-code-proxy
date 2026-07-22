@@ -115,7 +115,13 @@ MIMOCODE_SERVER_PASSWORD="$MIMO_PASSWORD" \
   "$MIMO_BIN_ABS" serve --hostname 0.0.0.0 --port "$MIMO_PORT" --print-logs &
 MIMO_PID=$!
 
-# 3. Proxy reverso + OpenAI
+# 3. Instala dependências do proxy (se necessário)
+if [ ! -d "$SCRIPT_DIR/node_modules" ]; then
+  echo "==> Instalando dependências do proxy..."
+  npm install --omit=dev --prefix "$SCRIPT_DIR" 2>&1 | tail -1
+fi
+
+# 4. Proxy reverso + OpenAI
 MIMO_PROXY_TOKEN="$PROXY_TOKEN" \
 MIMO_SERVER_URL="http://127.0.0.1:$MIMO_PORT" \
 MIMO_SERVER_PASSWORD="$MIMO_PASSWORD" \
