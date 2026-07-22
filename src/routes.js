@@ -344,8 +344,6 @@ export function handleChatCompletions(clientReq, clientRes) {
           );
           if (lastOpen > lastEnd) {
             cleanText += fullText.slice(lastEnd, lastOpen);
-          } else {
-            cleanText += fullText.slice(lastEnd);
           }
         } else {
           cleanText += fullText.slice(lastEnd);
