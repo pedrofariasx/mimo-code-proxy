@@ -10,10 +10,9 @@ import {
   MAX_POOL_SIZE,
   FALLBACK_MS,
 } from "./config.js";
-import { serverReq, openMiMoEvents } from "./mimo-client.js";
+import { serverReq, openMiMoEvents, agent } from "./mimo-client.js";
 import { isAuthorized, readBody, deny, bad } from "./auth.js";
 import {
-  openAIModels,
   openAICompletion,
   openAIDelta,
   openAIDeltaRaw,
@@ -32,14 +31,6 @@ import {
   findCompleteToolBlocks,
   hasIncompleteToolBlock,
 } from "./tools.js";
-
-const agent = new http.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 10000,
-  noDelay: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
-});
 
 const MAX_MAP_ENTRIES = 500;
 
@@ -233,25 +224,26 @@ export function handleChatCompletions(clientReq, clientRes) {
           let out;
 
           let usage;
+          let parsedTools = null;
+          if (clientTools) {
+            parsedTools = parseHermesToolCalls(text, clientTools);
+          }
+
           if (tokensIn > 0 || tokensOut > 0) {
             usage = {
               prompt_tokens: tokensIn,
               completion_tokens: tokensOut,
               total_tokens: tokensIn + tokensOut,
             };
+          } else if (parsedTools) {
+            usage = calculateUsage(body.messages, parsedTools.content, parsedTools.toolCalls);
           } else {
-            if (clientTools) {
-              const { content, toolCalls } = parseHermesToolCalls(text, clientTools);
-              usage = calculateUsage(body.messages, content, toolCalls);
-            } else {
-              const norm = RAW ? normalizeToolXML(text) : text;
-              usage = calculateUsage(body.messages, norm, []);
-            }
+            const norm = RAW ? normalizeToolXML(text) : text;
+            usage = calculateUsage(body.messages, norm, []);
           }
 
-          if (clientTools) {
-            const { content, toolCalls } = parseHermesToolCalls(text, clientTools);
-            out = openAICompletion(chatId, model, created, content, toolCalls, usage);
+          if (parsedTools) {
+            out = openAICompletion(chatId, model, created, parsedTools.content, parsedTools.toolCalls, usage);
           } else {
             if (RAW) text = normalizeToolXML(text);
             out = openAICompletion(chatId, model, created, text, null, usage);
@@ -305,7 +297,7 @@ export function handleChatCompletions(clientReq, clientRes) {
 
       const streamState = {
         sentTextLength: 0,
-        sentBlockEnds: [],
+        sentBlockEnds: new Set(),
         totalToolCallsSent: 0,
         allToolCalls: [],
         cleanText: "",
@@ -369,7 +361,7 @@ export function handleChatCompletions(clientReq, clientRes) {
 
         const sentEnds = streamState.sentBlockEnds;
         for (const block of blocks) {
-          if (sentEnds.includes(block.end)) continue;
+          if (sentEnds.has(block.end)) continue;
 
           const tc = block.toolCall;
           if (!tc) continue;
@@ -383,7 +375,7 @@ export function handleChatCompletions(clientReq, clientRes) {
           streamState.allToolCalls.push(tc);
           sse(clientRes, openAIDeltaRaw(chatId, model, created, { tool_calls: delta }));
           streamState.totalToolCallsSent++;
-          sentEnds.push(block.end);
+          sentEnds.add(block.end);
         }
       };
 

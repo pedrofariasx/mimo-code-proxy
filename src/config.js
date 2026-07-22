@@ -35,11 +35,11 @@ export const WATCHDOG_MS = parseNumber(process.env.MIMO_PROXY_WATCHDOG_MS, 600_0
 export const MAX_POOL_SIZE = parseNumber(process.env.MIMO_PROXY_POOL_SIZE, 2);
 export const BODY_MAX_BYTES = 4 * 1024 * 1024; // ~1M tokens (~4 chars/token)
 export const FALLBACK_MS = parseNumber(process.env.MIMO_PROXY_FALLBACK_MS, 500);
+export const CORS_ORIGIN = process.env.MIMO_PROXY_CORS_ORIGIN || "*";
 
 const TOKEN = process.env.MIMO_PROXY_TOKEN;
 if (REQUIRE_AUTH && !TOKEN) {
-  console.error("Erro: defina MIMO_PROXY_TOKEN");
-  process.exit(1);
+  throw new Error("MIMO_PROXY_TOKEN é obrigatório quando MIMO_PROXY_REQUIRE_AUTH != false");
 }
 
 export const upstream = new URL(SERVER_URL);

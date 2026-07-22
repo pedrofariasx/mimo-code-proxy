@@ -10,9 +10,12 @@ import { TOKEN, REQUIRE_AUTH, BODY_MAX_BYTES } from "./config.js";
  */
 export function safeCompare(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return true;
+  const bufA = Buffer.alloc(maxLen, 0);
+  const bufB = Buffer.alloc(maxLen, 0);
+  bufA.write(a);
+  bufB.write(b);
   return crypto.timingSafeEqual(bufA, bufB);
 }
 

@@ -20,6 +20,7 @@ import {
   HOST,
   RAW,
   REQUIRE_AUTH,
+  CORS_ORIGIN,
   upstream,
   SERVER_AUTH,
 } from "./src/config.js";
@@ -28,8 +29,8 @@ import { openAIModels } from "./src/openai.js";
 import { reverseProxy, handleChatCompletions, drainPool } from "./src/routes.js";
 
 const server = http.createServer(async (clientReq, clientRes) => {
-  // CORS Headers para permitir requisições de clientes web locais (ex: interfaces no navegador)
-  clientRes.setHeader("Access-Control-Allow-Origin", "*");
+  // CORS Headers
+  clientRes.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN);
   clientRes.setHeader(
     "Access-Control-Allow-Headers",
     clientReq.headers["access-control-request-headers"] || "*",
@@ -157,7 +158,7 @@ server.listen(PORT, HOST, () => {
   );
   console.log(
     REQUIRE_AUTH
-      ? `Auth do proxy: ativada (use o header 'X-API-Key: ${TOKEN}')`
+      ? `Auth do proxy: ativada (use o header 'X-API-Key: ${TOKEN.slice(0, 4)}...')`
       : `Auth do proxy: DESATIVADA (MIMO_PROXY_REQUIRE_AUTH=false) — não exponha na internet`,
   );
 });

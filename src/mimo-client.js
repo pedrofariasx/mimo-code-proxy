@@ -1,7 +1,7 @@
 import http from "node:http";
 import { upstream, SERVER_AUTH } from "./config.js";
 
-const agent = new http.Agent({
+export const agent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 10000,
   noDelay: true,
