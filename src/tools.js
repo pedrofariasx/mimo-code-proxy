@@ -151,6 +151,7 @@ function coerceParam(value, schema, paramName) {
     'content', 'text', 'code', 'newstring', 'oldstring',
     'patch', 'diff', 'file_text', 'new_string', 'old_string',
     'new_str', 'old_str', 'replacement', 'search',
+    'filepath', 'file_path',
   ]
   const nameLower = (paramName || '').toLowerCase()
   if (!preserveWhitespaceParams.includes(nameLower)) {

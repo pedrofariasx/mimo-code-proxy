@@ -26,6 +26,7 @@ export const NATIVE_TOOLS = [
         type: 'object',
         properties: {
           file_path: { type: 'string', description: 'Absolute or relative path to the file' },
+          filePath: { type: 'string', description: 'Absolute or relative path to the file (camelCase alias)' },
           offset: { type: 'number', description: 'Starting line number (1-indexed)' },
           limit: { type: 'number', description: 'Maximum number of lines to read' },
         },
