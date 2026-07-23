@@ -69,6 +69,7 @@ export function normalizeToolXML(text) {
     },
   )
   t = t.replace(/<tool_call>\s*/g, '').replace(/\s*<\/tool_call>/g, '')
+  t = t.replace(/\[Called [a-zA-Z0-9_.-]+\]/g, '')
   return t
 }
 
