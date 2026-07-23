@@ -97,6 +97,11 @@ export function openMiMoEvents(onEvent, onError) {
         res.setEncoding("utf8");
         res.on("data", (chunk) => {
           buf += chunk;
+          if (buf.length > 1_000_000) {
+            res.destroy();
+            handleFailure(new Error("SSE buffer overflow"));
+            return;
+          }
           let idx;
           while ((idx = buf.indexOf("\n\n")) >= 0) {
             const raw = buf.slice(0, idx);

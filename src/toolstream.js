@@ -2,11 +2,7 @@ import { ToolStream } from '@pedrofariasx/toolstream'
 import { XmlAdapter, FunctionTagAdapter } from '@pedrofariasx/toolstream/adapters'
 import { jsonrepair } from 'jsonrepair'
 
-function preprocessForXml(chunk) {
-  return chunk
-    .replace(/<function=([a-zA-Z0-9_.-]+)>/g, '<tool_name>$1</tool_name>')
-    .replace(/<\/function>/g, '')
-}
+const MAX_TOOL_CACHE = 100
 
 export function createToolStream() {
   const adapter = new XmlAdapter()
@@ -35,6 +31,16 @@ export function parseToolCalls(text) {
   }
 
   return []
+}
+
+export function parseAllToolCalls(text) {
+  if (!text) return []
+
+  const ftAdapter = new FunctionTagAdapter()
+  const ftStream = new ToolStream({ provider: 'custom' })
+  ftStream.setCustomAdapter(ftAdapter)
+  ftStream.push(text)
+  return ftStream.finalize().map(repairToolCallArgs)
 }
 
 function repairToolCallArgs(call) {
@@ -130,4 +136,10 @@ export function toLegacyToolCall(tc) {
     type: 'function',
     function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
   }
+}
+
+function preprocessForXml(chunk) {
+  return chunk
+    .replace(/<function=([a-zA-Z0-9_.-]+)>/g, '<tool_name>$1</tool_name>')
+    .replace(/<\/function>/g, '')
 }
