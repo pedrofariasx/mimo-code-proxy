@@ -7,7 +7,6 @@ import {
   DEFAULT_MODEL,
   RAW,
   WATCHDOG_MS,
-  MAX_POOL_SIZE,
   FALLBACK_MS,
 } from './config.js'
 import { serverReq, openMiMoEvents, agent } from './mimo-client.js'
@@ -42,73 +41,17 @@ function evictSet(set, max = MAX_MAP_ENTRIES) {
   }
 }
 
-const sessionPool = []
-let isDraining = false
-let poolLock = false
-const poolQueue = []
-
-async function withPoolLock(fn) {
-  if (poolLock) {
-    return new Promise((resolve, reject) => {
-      poolQueue.push(async () => {
-        try { resolve(await fn()) } catch (e) { reject(e) }
-      })
-    })
-  }
-  poolLock = true
-  try {
-    return await fn()
-  } finally {
-    poolLock = false
-    if (poolQueue.length > 0) poolQueue.shift()()
-  }
-}
-
-export async function refillPool(retries = 3) {
-  await withPoolLock(async () => {
-    if (isDraining || sessionPool.length >= MAX_POOL_SIZE) return
-    try {
-      while (sessionPool.length < MAX_POOL_SIZE) {
-        const resp = await serverReq('POST', '/session', {
-          directory: process.cwd(),
-          name: 'openai-bridge',
-        })
-        const sid = resp.json?.id
-        if (sid) {
-          sessionPool.push(sid)
-        } else {
-          break
-        }
-      }
-    } catch (e) {
-      if (retries > 0) {
-        console.error(`Erro ao pre-criar sessao (${retries} retries left):`, e.message)
-        await new Promise((r) => setTimeout(r, 2000))
-        if (!isDraining) refillPool(retries - 1).catch(() => {})
-      }
-    }
+async function createSession() {
+  const resp = await serverReq('POST', '/session', {
+    directory: process.cwd(),
+    name: 'openai-bridge-' + Date.now(),
   })
+  const sid = resp.json?.id
+  if (!sid) throw new Error('Sessao nao criada pelo MiMo')
+  return sid
 }
 
-async function acquireSession() {
-  return await withPoolLock(async () => {
-    if (sessionPool.length > 0) {
-      const sid = sessionPool.shift()
-      refillPool().catch(() => {})
-      return sid
-    }
-    const resp = await serverReq('POST', '/session', {
-      directory: process.cwd(),
-      name: 'openai-bridge',
-    })
-    const sid = resp.json?.id
-    if (!sid) throw new Error('Sessao nao criada pelo MiMo')
-    refillPool().catch(() => {})
-    return sid
-  })
-}
-
-async function releaseSession(sid, retries = 3) {
+async function deleteSession(sid, retries = 3) {
   if (!sid) return
   for (let i = 0; i < retries; i++) {
     try {
@@ -119,17 +62,6 @@ async function releaseSession(sid, retries = 3) {
     }
   }
   console.error(`Falha ao deletar sessao ${sid} apos ${retries} tentativas`)
-}
-
-refillPool().catch(() => {})
-
-export async function drainPool() {
-  isDraining = true
-  const sids = sessionPool.splice(0)
-  await Promise.allSettled(sids.map((sid) =>
-    serverReq('DELETE', `/session/${sid}`)
-  ))
-  isDraining = false
 }
 
 export function reverseProxy(clientReq, clientRes) {
@@ -226,9 +158,9 @@ export function handleChatCompletions(clientReq, clientRes) {
 
       let sid
       try {
-        sid = await acquireSession()
+        sid = await createSession()
       } catch (e) {
-        return bad(clientRes, 'Falha ao obter sessão do pool: ' + e.message, 502)
+        return bad(clientRes, 'Falha ao criar sessão: ' + e.message, 502)
       }
 
       const created = Math.floor(Date.now() / 1000)
@@ -284,7 +216,7 @@ export function handleChatCompletions(clientReq, clientRes) {
           subEvents.close()
           return bad(clientRes, 'Falha na chamada ao MiMo: ' + e.message, 502)
         } finally {
-          releaseSession(sid)
+          deleteSession(sid)
         }
         return
       }
@@ -469,7 +401,7 @@ export function handleChatCompletions(clientReq, clientRes) {
           console.error('Erro ao fechar event stream:', e.message)
         }
         clearTimeout(watchdog)
-        releaseSession(sid)
+        deleteSession(sid)
         clientRes.end()
       }
 

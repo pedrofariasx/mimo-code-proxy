@@ -26,7 +26,7 @@ import {
 } from "./src/config.js";
 import { isAuthorized } from "./src/auth.js";
 import { openAIModels } from "./src/openai.js";
-import { reverseProxy, handleChatCompletions, drainPool } from "./src/routes.js";
+import { reverseProxy, handleChatCompletions } from "./src/routes.js";
 
 const server = http.createServer(async (clientReq, clientRes) => {
   // CORS Headers
@@ -165,7 +165,6 @@ server.listen(PORT, HOST, () => {
 
 async function shutdown() {
   console.log("\nDesligando...");
-  await drainPool().catch(() => {});
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000);
 }
